@@ -198,7 +198,7 @@ const ModelConfigSchema = z.object({
   contrastiveWeight: z.number().min(0).max(1).default(0.1)
 });
 
-type TitanMemoryConfig = z.infer<typeof ModelConfigSchema>;
+export type TitanMemoryConfig = z.infer<typeof ModelConfigSchema>;
 
 interface WeightInfo {
   shape: number[];
