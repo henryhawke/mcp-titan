@@ -1147,9 +1147,25 @@ export class TitanMemoryModel implements IMemoryModel {
 
       const encodedInput = this.encoder.predict(inputVector) as tf.Tensor2D;
       const attentionBlock = this.computeMemoryAttention(encodedInput);
-      const memoryContextTensor = this.config.useHierarchicalMemory
-        ? unwrapTensor(this.retrieveFromHierarchicalMemory(wrapTensor(encodedInput)))
-        : attentionBlock.values;
+
+      let memoryContextTensor: tf.Tensor;
+      if (this.config.useHierarchicalMemory) {
+        const flattenedEncodedInput = encodedInput.squeeze() as tf.Tensor1D;
+        const retrievedTensor = unwrapTensor(
+          this.retrieveFromHierarchicalMemory(wrapTensor(flattenedEncodedInput))
+        ) as tf.Tensor;
+        flattenedEncodedInput.dispose();
+
+        if (retrievedTensor.shape.length === 1) {
+          const expanded = tf.expandDims(retrievedTensor as tf.Tensor1D, 0);
+          retrievedTensor.dispose();
+          memoryContextTensor = expanded;
+        } else {
+          memoryContextTensor = retrievedTensor;
+        }
+      } else {
+        memoryContextTensor = attentionBlock.values;
+      }
 
       const combined = tf.concat([encodedInput, memoryContextTensor], 1);
       const decoded = this.decoder.predict(combined) as tf.Tensor2D;
@@ -3199,6 +3215,13 @@ export class TitanMemoryModel implements IMemoryModel {
     }
 
     return this.withErrorHandling('initializeHierarchicalMemory', () => {
+      if (this.hierarchicalMemory) {
+        this.hierarchicalMemory.levels.forEach(level => level.dispose());
+        this.hierarchicalMemory.timestamps.forEach(ts => ts.dispose());
+        this.hierarchicalMemory.accessCounts.forEach(count => count.dispose());
+        this.hierarchicalMemory.surpriseScores.forEach(score => score.dispose());
+      }
+
       // Create multi-level memory structure
       const levels = this.hierarchicalLevels;
       const slotsPerLevel = Math.floor(this.config.memorySlots / levels);
@@ -3208,23 +3231,23 @@ export class TitanMemoryModel implements IMemoryModel {
       const shortTermLevels = Array(levels).fill(0).map((_, i) => {
         // Each level has fewer slots but covers longer time spans
         const levelSlots = Math.max(1, Math.floor(slotsPerLevel / (i + 1)));
-        return tf.zeros([levelSlots, embeddingSize]);
+        return tf.keep(tf.zeros([levelSlots, embeddingSize]));
       });
 
       // Initialize corresponding metadata for each level
       const timestampLevels = Array(levels).fill(0).map((_, i) => {
         const levelSlots = Math.max(1, Math.floor(slotsPerLevel / (i + 1)));
-        return tf.zeros([levelSlots]);
+        return tf.keep(tf.zeros([levelSlots]));
       });
 
       const accessCountLevels = Array(levels).fill(0).map((_, i) => {
         const levelSlots = Math.max(1, Math.floor(slotsPerLevel / (i + 1)));
-        return tf.zeros([levelSlots]);
+        return tf.keep(tf.zeros([levelSlots]));
       });
 
       // Initialize surprise scores for each level
       const surpriseLevels = Array(levels).fill(0).map((_, i) => {
-        return tf.zeros([Math.max(10, Math.floor(100 / (i + 1)))]);
+        return tf.keep(tf.zeros([Math.max(10, Math.floor(100 / (i + 1)))]));
       });
 
       this.hierarchicalMemory = {
@@ -3358,64 +3381,74 @@ export class TitanMemoryModel implements IMemoryModel {
       };
       const { levels, accessCounts } = hierarchicalMemory;
 
-      // Calculate attention across all levels
+      const rawQuery = unwrapTensor(query) as tf.Tensor;
+      let queryTensor = rawQuery;
+
+      if (queryTensor.shape.length === 2) {
+        if (queryTensor.shape[0] === 1) {
+          queryTensor = queryTensor.squeeze() as tf.Tensor;
+        } else if (queryTensor.shape[1] === 1) {
+          queryTensor = queryTensor.reshape([queryTensor.shape[0]]);
+        } else {
+          const lastDim = queryTensor.shape[queryTensor.shape.length - 1];
+          queryTensor = queryTensor.reshape([lastDim]);
+        }
+      }
+
+      if (queryTensor.shape.length !== 1) {
+        queryTensor = queryTensor.reshape([queryTensor.size]);
+      }
+
+      const queryVector = queryTensor as tf.Tensor1D;
+      const queryData = queryVector.arraySync() as number[];
+      const queryColumn = tf.tensor2d(queryData, [queryData.length, 1]);
+
       const attentionResults = levels.map((levelMemory, levelIndex) => {
-        // Calculate similarity between query and all memories at this level
-        const similarities = tf.matMul(
-          levelMemory,
-          unwrapTensor(query).reshape([unwrapTensor(query).shape[0], 1]),
-          false,
-          true
-        );
+        const similarities = tf.matMul(levelMemory, queryColumn) as tf.Tensor2D;
+        const temperature = 1.0 / (levelIndex + 1);
+        const scaledSimilarities = tf.div(similarities, temperature);
+        similarities.dispose();
+        const flattenedSimilarities = tf.squeeze(scaledSimilarities, [1]);
+        scaledSimilarities.dispose();
+        const attentionWeights = tf.softmax(flattenedSimilarities) as tf.Tensor1D;
+        flattenedSimilarities.dispose();
 
-        // Apply temperature scaling
-        const temperature = 1.0 / (levelIndex + 1); // Lower temperature for higher levels
-        const scaledSimilarities = tf.div(similarities, tf.scalar(temperature));
-
-        // Convert to attention weights
-        const attentionWeights = tf.softmax(scaledSimilarities);
-
-        // Update access counts
         const newAccessCounts = accessCounts[levelIndex].add(attentionWeights);
         tf.dispose(accessCounts[levelIndex]);
         accessCounts[levelIndex] = newAccessCounts;
 
-        // Weight memories by attention
-        const weightedMemories = tf.matMul(
-          attentionWeights,
-          levelMemory,
-          true,
-          false
-        );
+        const attentionWeightsRow = attentionWeights.reshape([1, attentionWeights.shape[0]]);
+        const weightedMemories = tf.matMul(attentionWeightsRow, levelMemory);
+        attentionWeightsRow.dispose();
+        const weightedVector = tf.squeeze(weightedMemories) as tf.Tensor1D;
+        weightedMemories.dispose();
 
-        // Apply level importance (higher levels have more weight)
-        const levelImportance = Math.pow(0.8, levelIndex); // Exponential decay of importance
-        return tf.mul(weightedMemories, tf.scalar(levelImportance));
+        const levelResult = tf.mul(weightedVector, Math.pow(0.8, levelIndex)) as tf.Tensor1D;
+        weightedVector.dispose();
+        attentionWeights.dispose();
+        return levelResult;
       });
 
-      // Combine results from all levels
-      let combinedMemory: tf.Tensor;
       if (attentionResults.length === 0) {
         throw new MemoryError('No attention results to combine');
-      } else if (attentionResults.length === 1) {
-        combinedMemory = attentionResults[0];
-      } else {
-        combinedMemory = attentionResults.reduce((acc, levelResult) => {
-          const result = tf.add(acc, levelResult);
-          tf.dispose(acc);
-          return result;
-        });
       }
 
-      // Normalize the result
-      const normalizedMemory = tf.div(
-        combinedMemory,
-        tf.norm(combinedMemory)
-      );
+      let combinedMemory = attentionResults[0].clone();
+      for (let i = 1; i < attentionResults.length; i++) {
+        const sum = tf.add(combinedMemory, attentionResults[i]) as tf.Tensor1D;
+        combinedMemory.dispose();
+        combinedMemory = sum;
+      }
 
-      // Dispose intermediate tensors
-      attentionResults.forEach(tensor => tf.dispose(tensor));
-      tf.dispose(combinedMemory);
+      const norm = tf.norm(combinedMemory);
+      const safeNorm = tf.maximum(norm, tf.scalar(1e-12));
+      const normalizedMemory = tf.div(combinedMemory, safeNorm) as tf.Tensor1D;
+
+      attentionResults.forEach(tensor => tensor.dispose());
+      combinedMemory.dispose();
+      norm.dispose();
+      safeNorm.dispose();
+      queryColumn.dispose();
 
       return wrapTensor(normalizedMemory);
     });
