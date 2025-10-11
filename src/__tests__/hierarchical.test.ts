@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals';
 import * as tf from '@tensorflow/tfjs-node';
 import { TitanMemoryModel } from '../model.js';
 import { wrapTensor, unwrapTensor, type IMemoryState } from '../types.js';
@@ -24,6 +25,7 @@ describe('Hierarchical Memory Promotion/Demotion', () => {
             inputDim: 16,
             memoryDim: 16,
             memorySlots: 10,
+            useHierarchicalMemory: true,
             enableHierarchicalMemory: true,
             enableMomentum: false,
             enableForgettingGate: false
@@ -50,7 +52,6 @@ describe('Hierarchical Memory Promotion/Demotion', () => {
         input.dispose();
         unwrapTensor(result.predicted).dispose();
         disposeState(state);
-        disposeState(result.memoryUpdate.newState);
     });
 
     test('should track promotion/demotion statistics', () => {
@@ -93,6 +94,64 @@ describe('Hierarchical Memory Promotion/Demotion', () => {
         // Memory slots should be allocated appropriately
         expect(config.memorySlots).toBe(10);
         expect(config.memoryDim).toBe(16);
+    });
+
+    test('should retrieve normalized vector without dimension errors', async () => {
+        const testModel = new TitanMemoryModel();
+        await testModel.initialize({
+            inputDim: 16,
+            memoryDim: 16,
+            memorySlots: 10,
+            useHierarchicalMemory: true,
+            enableHierarchicalMemory: true,
+            enableMomentum: false,
+            enableForgettingGate: false
+        });
+
+        const inputDim = testModel.getConfig().inputDim;
+        const input = tf.randomNormal([inputDim]);
+
+        const originalRetrieve = (testModel as any).retrieveFromHierarchicalMemory;
+        const retrievedVectors: tf.Tensor[] = [];
+
+        const retrieveSpy = jest
+            .spyOn(testModel as any, 'retrieveFromHierarchicalMemory')
+            .mockImplementation(function (this: any, query: any) {
+                const result = originalRetrieve.call(this, query);
+                const tensor = unwrapTensor(result) as tf.Tensor;
+                retrievedVectors.push(tf.keep(tensor.clone()));
+                return result;
+            });
+
+        let forwardResult: ReturnType<TitanMemoryModel['forward']> | undefined;
+        try {
+            expect(() => {
+                forwardResult = testModel.forward(wrapTensor(input));
+            }).not.toThrow();
+
+            expect(retrievedVectors.length).toBeGreaterThan(0);
+            const retrieved = retrievedVectors[0];
+            const normTensor = retrieved.norm();
+            const normValue = normTensor.arraySync() as number;
+
+            expect(retrieved.shape.length).toBe(1);
+            expect(normValue).toBeGreaterThanOrEqual(0);
+            expect(normValue).toBeLessThanOrEqual(1 + 1e-5);
+
+            normTensor.dispose();
+        } finally {
+            retrieveSpy.mockRestore();
+            retrievedVectors.forEach(tensor => tensor.dispose());
+
+            if (forwardResult) {
+                unwrapTensor(forwardResult.predicted).dispose();
+            }
+
+            input.dispose();
+            testModel.dispose();
+        }
+
+        expect(forwardResult).toBeDefined();
     });
 });
 
