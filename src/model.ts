@@ -1401,46 +1401,127 @@ export class TitanMemoryModel implements IMemoryModel {
   } {
     return this.withErrorHandling('trainStep', () => {
       return tf.tidy(() => {
-        const { predicted, memoryUpdate } = this.forward(currentInput, state);
+        this.encoder = this.encoder ?? this.createEncoder();
+        this.decoder = this.decoder ?? this.createDecoder();
 
-        const predictedTensor = unwrapTensor(predicted);
-        const targetTensor = unwrapTensor(nextInput);
-        const reshapedTarget = targetTensor.reshape(predictedTensor.shape);
-        let predictionLoss = tf.losses.meanSquaredError(
-          reshapedTarget,
-          predictedTensor
-        );
-        if (predictionLoss.rank !== 0) {
-          predictionLoss = tf.mean(predictionLoss);
+        const encoderVariables = this.encoder
+          ? this.encoder.trainableWeights.map(weight => (weight as unknown as { val: tf.Variable }).val)
+          : [];
+        const decoderVariables = this.decoder
+          ? this.decoder.trainableWeights.map(weight => (weight as unknown as { val: tf.Variable }).val)
+          : [];
+        const trainableVariables = [...encoderVariables, ...decoderVariables];
+
+        let forwardResult: { predicted: ITensor; memoryUpdate: IMemoryUpdateResult } | null = null;
+
+        const lossFunction = () => {
+          const result = this.forward(currentInput, state);
+          forwardResult = result;
+
+          return tf.tidy(() => {
+            const predictedTensor = unwrapTensor(result.predicted);
+            const targetTensor = unwrapTensor(nextInput);
+            const reshapedTarget = targetTensor.reshape(predictedTensor.shape);
+
+            let predictionLoss = tf.losses.meanSquaredError(
+              reshapedTarget,
+              predictedTensor
+            );
+            if (predictionLoss.rank !== 0) {
+              predictionLoss = tf.mean(predictionLoss);
+            }
+
+            let contrastiveComponent = tf.scalar(0.0);
+            if (this.config.enableContrastiveLearning) {
+              const currentEncoded = this.encoder!.predict(unwrapTensor(currentInput)) as tf.Tensor;
+              const nextEncoded = this.encoder!.predict(unwrapTensor(nextInput)) as tf.Tensor;
+              let contrastiveLoss = unwrapTensor(
+                this.contrastiveLearning(
+                  currentEncoded,
+                  nextEncoded
+                )
+              );
+              if (contrastiveLoss.rank !== 0) {
+                safeLog("Warning: Contrastive loss tensor was not rank 0. Taking mean.");
+                contrastiveLoss = tf.mean(contrastiveLoss);
+              }
+              contrastiveComponent = contrastiveLoss as tf.Scalar;
+            }
+
+            const contrastiveWeight = this.config.contrastiveWeight || 0.1;
+            const weightedContrastive = tf.mul(contrastiveComponent, tf.scalar(contrastiveWeight));
+            const combinedLoss = tf.add(
+              predictionLoss,
+              weightedContrastive
+            ) as tf.Scalar;
+
+            return combinedLoss;
+          });
+        };
+
+        const gradientComputation = trainableVariables.length > 0
+          ? tf.variableGrads(lossFunction, trainableVariables)
+          : tf.variableGrads(lossFunction);
+        const { value: lossValue, grads } = gradientComputation;
+
+        if (!forwardResult) {
+          throw new Error('Forward pass did not execute during gradient computation.');
         }
-        reshapedTarget.dispose();
 
-        let contrastiveLoss = tf.scalar(0.0);
-        if (this.config.enableContrastiveLearning) {
-          if (!this.encoder) { this.encoder = this.createEncoder(); }
-          const currentEncoded = this.encoder.predict(unwrapTensor(currentInput)) as tf.Tensor;
-          const nextEncoded = this.encoder.predict(unwrapTensor(nextInput)) as tf.Tensor;
-          let contrastiveLossScalar = unwrapTensor(
-            this.contrastiveLearning(
-              currentEncoded,
-              nextEncoded
-            )
-          );
-          if (contrastiveLossScalar.rank !== 0) {
-            safeLog("Warning: Contrastive loss tensor was not rank 0. Taking mean.");
-            const meanLoss = contrastiveLossScalar.mean();
-            tf.dispose(contrastiveLossScalar);
-            contrastiveLossScalar = meanLoss;
-          }
-          contrastiveLoss = contrastiveLossScalar as tf.Scalar;
-        }
+        const lossTensor = tf.keep(lossValue.clone());
+        lossValue.dispose();
 
-        const contrastiveWeight = this.config.contrastiveWeight || 0.1;
-        const combinedLoss = tf.add(
-          predictionLoss,
-          tf.mul(contrastiveLoss, tf.scalar(contrastiveWeight))
-        );
+        const encoderVariableNames = new Set(encoderVariables.map(variable => variable.name));
+        const decoderVariableNames = new Set(decoderVariables.map(variable => variable.name));
 
+        const gradientSummaries = tf.tidy(() => {
+          const normFor = (names: Set<string>) => {
+            const tensors = Array.from(names)
+              .map(name => grads[name])
+              .filter((tensor): tensor is tf.Tensor => tensor != null);
+            if (tensors.length === 0) {
+              return tf.keep(tf.scalar(0));
+            }
+            const squaredSums = tensors.map(tensor => {
+              const squared = tf.square(tensor);
+              const summed = tf.sum(squared);
+              squared.dispose();
+              return summed;
+            });
+            const aggregate = squaredSums.length === 1
+              ? squaredSums[0]
+              : tf.addN(squaredSums);
+            if (squaredSums.length > 1) {
+              squaredSums.forEach(t => t.dispose());
+            }
+            const norm = tf.sqrt(aggregate);
+            aggregate.dispose();
+            return tf.keep(norm);
+          };
+
+          const encoderNorm = normFor(encoderVariableNames);
+          const decoderNorm = normFor(decoderVariableNames);
+          const encoderSquared = tf.square(encoderNorm);
+          const decoderSquared = tf.square(decoderNorm);
+          const summedSquares = tf.add(encoderSquared, decoderSquared);
+          const totalNormTensor = tf.sqrt(summedSquares);
+          encoderSquared.dispose();
+          decoderSquared.dispose();
+          summedSquares.dispose();
+          const totalNorm = tf.keep(totalNormTensor);
+
+          return {
+            encoder: encoderNorm,
+            decoder: decoderNorm,
+            total: totalNorm
+          };
+        });
+
+        this.optimizer.applyGradients(grads);
+        Object.values(grads).forEach(tensor => tensor.dispose());
+        this.stepCount++;
+
+        const { predicted, memoryUpdate } = forwardResult;
         let updatedMemoryState = memoryUpdate.newState;
 
         let momentumApplied = false;
@@ -1467,17 +1548,12 @@ export class TitanMemoryModel implements IMemoryModel {
 
         this.memoryState = updatedMemoryState;
 
-        this.optimizer.applyGradients({});
-        this.stepCount++;
-
-        tf.dispose([predictionLoss, contrastiveLoss]);
-
         return {
-          loss: wrapTensor(combinedLoss),
+          loss: wrapTensor(lossTensor),
           gradients: {
-            shortTerm: wrapTensor(tf.zeros([1])),
-            longTerm: wrapTensor(tf.zeros([1])),
-            meta: wrapTensor(tf.zeros([1]))
+            shortTerm: wrapTensor(gradientSummaries.encoder),
+            longTerm: wrapTensor(gradientSummaries.decoder),
+            meta: wrapTensor(gradientSummaries.total)
           },
           memoryUpdate: {
             ...memoryUpdate,
