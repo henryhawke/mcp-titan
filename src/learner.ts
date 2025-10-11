@@ -178,47 +178,66 @@ export class LearnerService {
   /**
    * Add a training sample to the replay buffer
    */
-  addTrainingSample(
+  async addTrainingSample(
     input: string | tf.Tensor,
     target: string | tf.Tensor,
     positive?: string | tf.Tensor,
     negative?: string | tf.Tensor
-  ): void {
-    tf.tidy(() => {
-      // Handle sync case for tensors or mock tokenizer that returns tensors directly
-      const inputTensor = typeof input === 'string' 
-        ? (this.tokenizer.encode as any)(input) // Cast to any to handle mock
-        : input.clone();
-      const targetTensor = typeof target === 'string' 
-        ? (this.tokenizer.encode as any)(target)
-        : target.clone();
-      
-      const positiveTensor = positive 
-        ? (typeof positive === 'string' 
-           ? (this.tokenizer.encode as any)(positive)
-           : positive.clone())
-        : undefined;
-      
-      const negativeTensor = negative 
-        ? (typeof negative === 'string' 
-           ? (this.tokenizer.encode as any)(negative)
-           : negative.clone())
-        : undefined;
+  ): Promise<void> {
+    const inputInfo = await this.normalizeSample(input);
+    const targetInfo = await this.normalizeSample(target);
+    const positiveInfo = positive ? await this.normalizeSample(positive) : undefined;
+    const negativeInfo = negative ? await this.normalizeSample(negative) : undefined;
 
-      // Generate random mask indices for MLM
-      const maskIndices = this.generateMaskIndices(inputTensor.shape[0]);
+    const sample: TrainingSample = {
+      input: inputInfo.tensor,
+      target: targetInfo.tensor,
+      positive: positiveInfo?.tensor,
+      negative: negativeInfo?.tensor,
+      maskIndices: this.generateMaskIndices(inputInfo.sequenceLength),
+      timestamp: Date.now()
+    };
 
-      const sample: TrainingSample = {
-        input: inputTensor,
-        target: targetTensor,
-        positive: positiveTensor,
-        negative: negativeTensor,
-        maskIndices,
-        timestamp: Date.now()
-      };
+    this.replayBuffer.add(sample);
+  }
 
-      this.replayBuffer.add(sample);
-    });
+  private async normalizeSample(value: string | tf.Tensor): Promise<{ tensor: tf.Tensor; sequenceLength: number }> {
+    if (typeof value === 'string') {
+      const encodeResult = await (this.tokenizer.encode as any)(value);
+
+      if (encodeResult == null) {
+        throw new Error('Tokenizer returned no result for provided text input.');
+      }
+
+      if (encodeResult instanceof tf.Tensor) {
+        const tensor = this.ensure1DTensor(encodeResult);
+        const sequenceLength = encodeResult.shape[0] ?? encodeResult.size;
+        encodeResult.dispose();
+        return { tensor, sequenceLength };
+      }
+
+      if ('embeddings' in encodeResult) {
+        const embeddings = encodeResult.embeddings as tf.Tensor;
+        const sequenceLength = embeddings.shape[0] ?? embeddings.size;
+        const averaged = tf.tidy(() => embeddings.mean(0));
+        embeddings.dispose();
+        return { tensor: averaged, sequenceLength };
+      }
+
+      throw new Error('Unsupported tokenizer encode result. Expected tensor embeddings.');
+    }
+
+    const tensor = value.clone();
+    const sequenceLength = tensor.shape[0] ?? tensor.size;
+    return { tensor, sequenceLength };
+  }
+
+  private ensure1DTensor(tensor: tf.Tensor): tf.Tensor {
+    if (tensor.rank === 1) {
+      return tensor.clone();
+    }
+
+    return tf.tidy(() => tensor.mean(0));
   }
 
   /**
