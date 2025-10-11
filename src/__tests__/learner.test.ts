@@ -33,6 +33,14 @@ class MockModel {
     };
   }
 
+  getTrainableVariables(): tf.Variable[] {
+    return [];
+  }
+
+  applyGradients(): void {
+    // No-op for mock
+  }
+
   // Stub methods to satisfy IMemoryModel interface
   trainStep() { return { loss: wrapTensor(tf.scalar(0.5)), gradients: {} as any }; }
   updateMetaMemory() { return wrapTensor(tf.zeros([10, 64])); }
@@ -67,6 +75,69 @@ class MockTokenizer {
 
   getSpecialTokens() {
     return { mask: 103, pad: 0, unk: 1 };
+  }
+}
+
+class TrainableModel {
+  public weight: tf.Variable;
+  public bias: tf.Variable;
+  private optimizer: tf.Optimizer;
+  private memoryState: IMemoryState;
+
+  constructor() {
+    this.weight = tf.variable(tf.randomNormal([4, 4]), true, 'trainable_weight');
+    this.bias = tf.variable(tf.zeros([4]), true, 'trainable_bias');
+    this.optimizer = tf.train.sgd(0.05);
+    this.memoryState = {
+      shortTerm: wrapTensor(tf.zeros([1, 4])),
+      longTerm: wrapTensor(tf.zeros([1, 4])),
+      meta: wrapTensor(tf.zeros([1, 4])),
+      timestamps: wrapTensor(tf.zeros([1])),
+      accessCounts: wrapTensor(tf.zeros([1])),
+      surpriseHistory: wrapTensor(tf.zeros([1]))
+    };
+  }
+
+  getMemoryState(): IMemoryState {
+    return this.memoryState;
+  }
+
+  forward(input: any, memoryState: IMemoryState) {
+    const tensor = unwrapTensor(input) as tf.Tensor1D;
+    const reshaped = tensor.reshape([1, tensor.shape[0]]);
+    const logits = tf.add(tf.matMul(reshaped, this.weight), this.bias);
+
+    return {
+      predicted: wrapTensor(logits.squeeze()),
+      memoryUpdate: {
+        newState: memoryState,
+        attention: {} as any,
+        surprise: {} as any
+      }
+    };
+  }
+
+  getTrainableVariables(): tf.Variable[] {
+    return [this.weight, this.bias];
+  }
+
+  applyGradients(gradients: Map<string, tf.Tensor>): void {
+    const namedGradients: tf.NamedTensorMap = {};
+    const weightGrad = gradients.get(this.weight.name);
+    if (weightGrad) {
+      namedGradients[this.weight.name] = weightGrad;
+    }
+    const biasGrad = gradients.get(this.bias.name);
+    if (biasGrad) {
+      namedGradients[this.bias.name] = biasGrad;
+    }
+    if (Object.keys(namedGradients).length > 0) {
+      this.optimizer.applyGradients(namedGradients);
+    }
+  }
+
+  dispose(): void {
+    this.optimizer.dispose();
   }
 }
 
@@ -242,6 +313,59 @@ describe('LearnerService', () => {
 
       input.dispose();
       target.dispose();
+    });
+  });
+
+  describe('Gradient application', () => {
+    test('performTrainingStep updates model weights', () => {
+      const trainableModel = new TrainableModel();
+      const gradientLearner = new LearnerService(trainableModel as any, mockTokenizer as any, {
+        ...testConfig,
+        batchSize: 2,
+        accumulationSteps: 1,
+        nextTokenWeight: 1,
+        contrastiveWeight: 0,
+        mlmWeight: 0
+      });
+
+      const samples: Array<{ input: tf.Tensor1D; target: tf.Tensor1D }> = [
+        {
+          input: tf.tensor1d([0.2, -0.1, 0.4, 0.3]),
+          target: tf.tensor1d([0, 1, 0, 0])
+        },
+        {
+          input: tf.tensor1d([-0.3, 0.5, 0.1, -0.2]),
+          target: tf.tensor1d([0, 0, 1, 0])
+        }
+      ];
+
+      for (const sample of samples) {
+        gradientLearner.addTrainingSample(sample.input, sample.target);
+      }
+
+      const initialWeight = trainableModel.weight.clone();
+      const initialBias = trainableModel.bias.clone();
+
+      (gradientLearner as any).performTrainingStep();
+
+      for (const sample of samples) {
+        sample.input.dispose();
+        sample.target.dispose();
+      }
+
+      const weightDiff = tf.sub(trainableModel.weight, initialWeight);
+      const biasDiff = tf.sub(trainableModel.bias, initialBias);
+      const weightChange = tf.max(tf.abs(weightDiff)).dataSync()[0];
+      const biasChange = tf.max(tf.abs(biasDiff)).dataSync()[0];
+
+      expect(Math.max(weightChange, biasChange)).toBeGreaterThan(0);
+
+      initialWeight.dispose();
+      initialBias.dispose();
+      weightDiff.dispose();
+      biasDiff.dispose();
+      gradientLearner.dispose();
+      trainableModel.dispose();
     });
   });
 

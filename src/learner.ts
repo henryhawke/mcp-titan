@@ -132,9 +132,11 @@ class GradientAccumulator {
 
   getAverageGradients(): Map<string, tf.Tensor> {
     const avgGradients = new Map<string, tf.Tensor>();
+    const scale = tf.scalar(this.accumulationSteps);
     for (const [key, gradient] of this.accumulatedGradients) {
-      avgGradients.set(key, tf.div(gradient, tf.scalar(this.accumulationSteps)));
+      avgGradients.set(key, tf.div(gradient, scale));
     }
+    scale.dispose();
     return avgGradients;
   }
 
@@ -304,7 +306,12 @@ export class LearnerService {
 
         // Gradient clipping
         const clippedGradients = this.clipGradients(gradients);
-        
+
+        for (const gradient of gradients.values()) {
+          gradient.dispose();
+        }
+        gradients.clear();
+
         // Accumulate gradients
         const shouldUpdate = this.gradientAccumulator.accumulate(clippedGradients);
         
@@ -313,7 +320,7 @@ export class LearnerService {
           const avgGradients = this.gradientAccumulator.getAverageGradients();
           this.applyGradients(avgGradients);
           this.gradientAccumulator.reset();
-          
+
           // Dispose average gradients
           for (const gradient of avgGradients.values()) {
             gradient.dispose();
@@ -346,28 +353,46 @@ export class LearnerService {
     loss: tf.Scalar;
     gradients: Map<string, tf.Tensor>;
   } {
-    let totalLoss = tf.scalar(0);
+    const trainableVars = this.model.getTrainableVariables();
+    const lossFn = () => {
+      const lossTerms: tf.Tensor[] = [];
+
+      if (this.config.nextTokenWeight > 0) {
+        const nextTokenLoss = this.computeNextTokenLoss(batch);
+        lossTerms.push(tf.mul(nextTokenLoss, tf.scalar(this.config.nextTokenWeight)));
+      }
+
+      if (this.config.contrastiveWeight > 0) {
+        const contrastiveLoss = this.computeContrastiveLoss(batch);
+        lossTerms.push(tf.mul(contrastiveLoss, tf.scalar(this.config.contrastiveWeight)));
+      }
+
+      if (this.config.mlmWeight > 0) {
+        const mlmLoss = this.computeMLMLoss(batch);
+        lossTerms.push(tf.mul(mlmLoss, tf.scalar(this.config.mlmWeight)));
+      }
+
+      if (lossTerms.length === 0) {
+        return tf.scalar(0);
+      }
+
+      return lossTerms.length === 1
+        ? (lossTerms[0] as tf.Scalar)
+        : (tf.addN(lossTerms) as tf.Scalar);
+    };
+
+    if (trainableVars.length === 0) {
+      return { loss: lossFn(), gradients: new Map<string, tf.Tensor>() };
+    }
+
+    const { value: mixedLoss, grads } = tf.variableGrads(lossFn, trainableVars);
+
     const gradients = new Map<string, tf.Tensor>();
-
-    // Next-token prediction loss
-    if (this.config.nextTokenWeight > 0) {
-      const nextTokenLoss = this.computeNextTokenLoss(batch);
-      totalLoss = tf.add(totalLoss, tf.mul(nextTokenLoss, tf.scalar(this.config.nextTokenWeight)));
+    for (const [name, gradient] of Object.entries(grads)) {
+      gradients.set(name, gradient as tf.Tensor);
     }
 
-    // Contrastive learning loss
-    if (this.config.contrastiveWeight > 0) {
-      const contrastiveLoss = this.computeContrastiveLoss(batch);
-      totalLoss = tf.add(totalLoss, tf.mul(contrastiveLoss, tf.scalar(this.config.contrastiveWeight)));
-    }
-
-    // Masked language modeling loss
-    if (this.config.mlmWeight > 0) {
-      const mlmLoss = this.computeMLMLoss(batch);
-      totalLoss = tf.add(totalLoss, tf.mul(mlmLoss, tf.scalar(this.config.mlmWeight)));
-    }
-
-    return { loss: totalLoss, gradients };
+    return { loss: mixedLoss as tf.Scalar, gradients };
   }
 
   /**
@@ -570,11 +595,31 @@ export class LearnerService {
    * Apply gradients to the model
    */
   private applyGradients(gradients: Map<string, tf.Tensor>): void {
-    // This would typically use the optimizer to apply gradients
-    // For now, we'll implement a simple gradient descent
-    for (const [key, gradient] of gradients) {
-      // Apply gradients to model parameters
-      // This is a placeholder - actual implementation would depend on model structure
+    try {
+      if (typeof this.model.applyGradients === 'function') {
+        this.model.applyGradients(gradients);
+        return;
+      }
+
+      const namedGradients: tf.NamedTensorMap = {};
+      const variableMap = new Map(
+        this.model.getTrainableVariables().map(variable => [variable.name, variable])
+      );
+
+      for (const [name, gradient] of gradients) {
+        if (variableMap.has(name)) {
+          namedGradients[name] = gradient;
+        }
+      }
+
+      if (Object.keys(namedGradients).length > 0) {
+        this.optimizer.applyGradients(namedGradients);
+      }
+    } finally {
+      for (const gradient of gradients.values()) {
+        gradient.dispose();
+      }
+      gradients.clear();
     }
   }
 
