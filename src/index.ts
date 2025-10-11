@@ -1033,6 +1033,28 @@ export class TitanMemoryServer {
         negative: z.union([z.string(), z.array(z.number())]).optional().describe("Negative sample for contrastive learning")
       },
       async (params) => {
+        const createdTensors: tf.Tensor[] = [];
+
+        const input = Array.isArray(params.input)
+          ? (() => { const tensor = tf.tensor1d(params.input); createdTensors.push(tensor); return tensor; })()
+          : params.input;
+
+        const target = Array.isArray(params.target)
+          ? (() => { const tensor = tf.tensor1d(params.target); createdTensors.push(tensor); return tensor; })()
+          : params.target;
+
+        const positive = params.positive === undefined
+          ? undefined
+          : Array.isArray(params.positive)
+            ? (() => { const tensor = tf.tensor1d(params.positive!); createdTensors.push(tensor); return tensor; })()
+            : params.positive;
+
+        const negative = params.negative === undefined
+          ? undefined
+          : Array.isArray(params.negative)
+            ? (() => { const tensor = tf.tensor1d(params.negative!); createdTensors.push(tensor); return tensor; })()
+            : params.negative;
+
         try {
           if (!this.learnerService) {
             return {
@@ -1043,19 +1065,7 @@ export class TitanMemoryServer {
             };
           }
 
-          // Convert inputs to tensors if they are arrays
-          const input = Array.isArray(params.input) ? tf.tensor1d(params.input) : params.input;
-          const target = Array.isArray(params.target) ? tf.tensor1d(params.target) : params.target;
-          const positive = params.positive ? (Array.isArray(params.positive) ? tf.tensor1d(params.positive) : params.positive) : undefined;
-          const negative = params.negative ? (Array.isArray(params.negative) ? tf.tensor1d(params.negative) : params.negative) : undefined;
-
-          this.learnerService.addTrainingSample(input, target, positive, negative);
-
-          // Clean up tensor references if we created them
-          if (Array.isArray(params.input)) { (input as tf.Tensor).dispose(); }
-          if (Array.isArray(params.target)) { (target as tf.Tensor).dispose(); }
-          if (positive && Array.isArray(params.positive)) { (positive as tf.Tensor).dispose(); }
-          if (negative && Array.isArray(params.negative)) { (negative as tf.Tensor).dispose(); }
+          await this.learnerService.addTrainingSample(input, target, positive, negative);
 
           const stats = this.learnerService.getTrainingStats();
 
@@ -1073,6 +1083,10 @@ export class TitanMemoryServer {
               text: `Failed to add training sample: ${message}`
             }]
           };
+        } finally {
+          for (const tensor of createdTensors) {
+            tensor.dispose();
+          }
         }
       }
     );

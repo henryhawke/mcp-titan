@@ -57,8 +57,20 @@ class MockModel {
 }
 
 class MockTokenizer {
-  encode(text: string): tf.Tensor {
-    return tf.randomNormal([64]);
+  private readonly attentionMask = tf.tensor1d([1, 1]);
+
+  async encode(text: string) {
+    return {
+      tokenIds: [1, 2],
+      embeddings: tf.randomNormal([2, 64]),
+      attentionMask: this.attentionMask,
+      metadata: {
+        originalLength: 2,
+        tokenizedLength: 2,
+        truncated: false,
+        usedLegacyMode: false
+      }
+    };
   }
 
   decode(tensor: tf.Tensor): string {
@@ -100,12 +112,12 @@ describe('LearnerService', () => {
   });
 
   describe('Ring Buffer', () => {
-    test('should add training samples to buffer', () => {
+    test('should add training samples to buffer', async () => {
       const input = tf.tensor1d([1, 2, 3, 4]);
       const target = tf.tensor1d([0, 1, 0, 1]);
 
-      learner.addTrainingSample(input, target);
-      
+      await learner.addTrainingSample(input, target);
+
       const stats = learner.getTrainingStats();
       expect(stats.bufferSize).toBe(1);
 
@@ -113,7 +125,7 @@ describe('LearnerService', () => {
       target.dispose();
     });
 
-    test('should handle buffer overflow correctly', () => {
+    test('should handle buffer overflow correctly', async () => {
       const bufferSize = 5;
       const smallConfig = { ...testConfig, bufferSize };
       const smallLearner = new LearnerService(mockModel as any, mockTokenizer as any, smallConfig);
@@ -122,7 +134,7 @@ describe('LearnerService', () => {
       for (let i = 0; i < bufferSize + 3; i++) {
         const input = tf.tensor1d([i, i + 1, i + 2, i + 3]);
         const target = tf.tensor1d([i % 2, (i + 1) % 2, i % 2, (i + 1) % 2]);
-        smallLearner.addTrainingSample(input, target);
+        await smallLearner.addTrainingSample(input, target);
         input.dispose();
         target.dispose();
       }
@@ -133,14 +145,14 @@ describe('LearnerService', () => {
       smallLearner.dispose();
     });
 
-    test('should add contrastive learning samples', () => {
+    test('should add contrastive learning samples', async () => {
       const input = tf.tensor1d([1, 2, 3, 4]);
       const target = tf.tensor1d([0, 1, 0, 1]);
       const positive = tf.tensor1d([1, 2, 3, 5]);
       const negative = tf.tensor1d([5, 6, 7, 8]);
 
-      learner.addTrainingSample(input, target, positive, negative);
-      
+      await learner.addTrainingSample(input, target, positive, negative);
+
       const stats = learner.getTrainingStats();
       expect(stats.bufferSize).toBe(1);
 
@@ -148,6 +160,28 @@ describe('LearnerService', () => {
       target.dispose();
       positive.dispose();
       negative.dispose();
+    });
+
+    test('should normalize text and tensor inputs to tf.Tensor instances', async () => {
+      const numericTarget = tf.tensor1d([0.1, 0.2, 0.3]);
+      await learner.addTrainingSample('text sample', numericTarget);
+
+      const tensorInput = tf.tensor1d([1, 2, 3]);
+      await learner.addTrainingSample(tensorInput, 'another sample');
+
+      const replayBuffer = (learner as any).replayBuffer as { buffer: any[]; size: number };
+      const storedSamples = replayBuffer.buffer.slice(0, replayBuffer.size);
+
+      expect(storedSamples).toHaveLength(2);
+      for (const sample of storedSamples) {
+        expect(sample.input instanceof tf.Tensor).toBe(true);
+        expect(sample.target instanceof tf.Tensor).toBe(true);
+        expect(sample.input.rank).toBe(1);
+        expect(sample.target.rank).toBe(1);
+      }
+
+      numericTarget.dispose();
+      tensorInput.dispose();
     });
   });
 
@@ -202,11 +236,11 @@ describe('LearnerService', () => {
       expect(initialStats.lastLoss).toBe(0);
     });
 
-    test('should update buffer size when samples are added', () => {
+    test('should update buffer size when samples are added', async () => {
       const input = tf.tensor1d([1, 2, 3, 4]);
       const target = tf.tensor1d([0, 1, 0, 1]);
 
-      learner.addTrainingSample(input, target);
+      await learner.addTrainingSample(input, target);
       
       const stats = learner.getTrainingStats();
       expect(stats.bufferSize).toBe(1);
@@ -217,28 +251,24 @@ describe('LearnerService', () => {
   });
 
   describe('Gradient Safety', () => {
-    test('should handle NaN gradients gracefully', () => {
+    test('should handle NaN gradients gracefully', async () => {
       // This is more of an integration test - we can't easily mock NaN gradients
       // but we can test that the service doesn't crash with various inputs
       const input = tf.tensor1d([0, 0, 0, 0]); // All zeros might cause numerical issues
       const target = tf.tensor1d([1, 1, 1, 1]);
 
-      expect(() => {
-        learner.addTrainingSample(input, target);
-      }).not.toThrow();
+      await expect(learner.addTrainingSample(input, target)).resolves.toBeUndefined();
 
       input.dispose();
       target.dispose();
     });
 
-    test('should clip gradients within specified range', () => {
+    test('should clip gradients within specified range', async () => {
       // Test that the service can handle extreme values
       const input = tf.tensor1d([1e6, -1e6, 1e6, -1e6]);
       const target = tf.tensor1d([1, 0, 1, 0]);
 
-      expect(() => {
-        learner.addTrainingSample(input, target);
-      }).not.toThrow();
+      await expect(learner.addTrainingSample(input, target)).resolves.toBeUndefined();
 
       input.dispose();
       target.dispose();
@@ -246,11 +276,11 @@ describe('LearnerService', () => {
   });
 
   describe('Memory Management', () => {
-    test('should dispose resources properly', () => {
+    test('should dispose resources properly', async () => {
       const input = tf.tensor1d([1, 2, 3, 4]);
       const target = tf.tensor1d([0, 1, 0, 1]);
 
-      learner.addTrainingSample(input, target);
+      await learner.addTrainingSample(input, target);
       learner.startTraining();
       
       // Record tensor count before disposal
@@ -265,12 +295,12 @@ describe('LearnerService', () => {
       target.dispose();
     });
 
-    test('should handle tf.tidy properly in training loops', () => {
+    test('should handle tf.tidy properly in training loops', async () => {
       // Add multiple samples to ensure buffer has content
       for (let i = 0; i < 10; i++) {
         const input = tf.tensor1d([i, i + 1, i + 2, i + 3]);
         const target = tf.tensor1d([i % 2, (i + 1) % 2, i % 2, (i + 1) % 2]);
-        learner.addTrainingSample(input, target);
+        await learner.addTrainingSample(input, target);
         input.dispose();
         target.dispose();
       }
@@ -300,18 +330,18 @@ describe('LearnerService', () => {
       }).not.toThrow();
     });
 
-    test('should process samples with different loss types', () => {
+    test('should process samples with different loss types', async () => {
       // Add samples with different characteristics
       const input1 = tf.tensor1d([1, 2, 3, 4]);
       const target1 = tf.tensor1d([0, 1, 0, 1]);
-      
+
       const input2 = tf.tensor1d([2, 3, 4, 5]);
       const target2 = tf.tensor1d([1, 0, 1, 0]);
       const positive2 = tf.tensor1d([2, 3, 4, 6]);
       const negative2 = tf.tensor1d([8, 9, 10, 11]);
 
-      learner.addTrainingSample(input1, target1);
-      learner.addTrainingSample(input2, target2, positive2, negative2);
+      await learner.addTrainingSample(input1, target1);
+      await learner.addTrainingSample(input2, target2, positive2, negative2);
       
       const stats = learner.getTrainingStats();
       expect(stats.bufferSize).toBe(2);
@@ -337,20 +367,20 @@ describe('LearnerService', () => {
       defaultLearner.dispose();
     });
 
-    test('should respect custom configuration values', () => {
+    test('should respect custom configuration values', async () => {
       const customConfig = {
         bufferSize: 50,
         batchSize: 8,
         updateInterval: 200
       };
-      
+
       const customLearner = new LearnerService(mockModel as any, mockTokenizer as any, customConfig);
-      
+
       // Add samples and verify buffer respects custom size
       for (let i = 0; i < 60; i++) {
         const input = tf.tensor1d([i, i + 1, i + 2, i + 3]);
         const target = tf.tensor1d([i % 2, (i + 1) % 2, i % 2, (i + 1) % 2]);
-        customLearner.addTrainingSample(input, target);
+        await customLearner.addTrainingSample(input, target);
         input.dispose();
         target.dispose();
       }
