@@ -190,6 +190,9 @@ export interface IMemoryModel {
     memoryUpdate: IMemoryUpdateResult;
   };
 
+  getTrainableVariables(): tf.Variable[];
+  applyGradients?(gradients: Map<string, tf.Tensor>): void;
+
   updateMetaMemory(surprise: ISurpriseMetrics, context: ITensor): ITensor;
   pruneMemory(memoryState: IMemoryState, threshold: number): IMemoryState;
   manifoldStep(base: ITensor, velocity: ITensor): ITensor;
@@ -521,6 +524,8 @@ export interface IMemoryModel {
   dispose(): void;
 
   // New methods
+  getTrainableVariables(): tf.Variable[];
+  applyGradients?(gradients: Map<string, tf.Tensor>): void;
   getMemoryState(): IMemoryState;
   resetMemory(): void;
   resetGradients(): void;

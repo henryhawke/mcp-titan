@@ -406,6 +406,76 @@ export class TitanMemoryModel implements IMemoryModel {
     }
   }
 
+  private ensureCoreNetworks(): void {
+    if (!this.encoder) {
+      this.encoder = this.createEncoder();
+    }
+    if (!this.decoder) {
+      this.decoder = this.createDecoder();
+    }
+  }
+
+  private ensureOptimizerInitialized(): void {
+    if (!this.optimizer) {
+      const learningRate = this.config.learningRate || 0.001;
+      this.optimizer = tf.train.adam(learningRate);
+    }
+  }
+
+  public getTrainableVariables(): tf.Variable[] {
+    this.ensureCoreNetworks();
+    this.ensureOptimizerInitialized();
+
+    const variables = new Map<string, tf.Variable>();
+    const collectVariables = (model?: tf.LayersModel | null) => {
+      if (!model) {
+        return;
+      }
+      for (const weight of model.trainableWeights ?? []) {
+        const variable = weight.val as tf.Variable;
+        if (variable && !variables.has(variable.name)) {
+          variables.set(variable.name, variable);
+        }
+      }
+    };
+
+    collectVariables(this.encoder);
+    collectVariables(this.decoder);
+    collectVariables(this.memoryProjector);
+    collectVariables(this.similarityNetwork);
+    for (const transformer of this.transformerStack) {
+      collectVariables(transformer);
+    }
+
+    return Array.from(variables.values());
+  }
+
+  public applyGradients(gradients: Map<string, tf.Tensor>): void {
+    if (gradients.size === 0) {
+      return;
+    }
+
+    const trainableVariables = this.getTrainableVariables();
+    if (trainableVariables.length === 0) {
+      return;
+    }
+
+    const variableLookup = new Map(trainableVariables.map(variable => [variable.name, variable]));
+    const namedGradients: tf.NamedTensorMap = {};
+
+    for (const [name, gradient] of gradients) {
+      if (variableLookup.has(name)) {
+        namedGradients[name] = gradient;
+      }
+    }
+
+    if (Object.keys(namedGradients).length === 0) {
+      return;
+    }
+
+    this.optimizer.applyGradients(namedGradients);
+  }
+
   constructor(config?: Partial<TitanMemoryConfig>) {
     // Initialize with empty config first
     this.config = ModelConfigSchema.parse(config || {});
