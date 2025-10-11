@@ -1,0 +1,128 @@
+
+> @henryhawke/mcp-titan@3.0.0 test
+> node --experimental-vm-modules node_modules/.bin/jest src/__tests__/momentum.test.ts
+
+  console.log
+    Initialized embedding matrix: [50000, 512]
+
+      at TokenEmbedding.initializeWeights (src/tokenizer/embedding.ts:75:13)
+
+  console.log
+    Advanced tokenizer components initialized
+
+      at AdvancedTokenizer.initializeComponents (src/tokenizer/index.ts:108:13)
+
+  console.log
+    [2025-10-11T02:45:34.482Z] INFO [memory.initialize]: Memory initialized with 8 slots, 16 dimensions undefined
+
+      at StructuredLogger.log (src/logging.ts:109:17)
+
+  console.log
+    [2025-10-11T02:45:34.586Z] INFO [memory.initialize]: Research paper features enabled: momentum undefined
+
+      at StructuredLogger.log (src/logging.ts:109:17)
+
+  console.log
+    Initialized embedding matrix: [50000, 512]
+
+      at TokenEmbedding.initializeWeights (src/tokenizer/embedding.ts:75:13)
+
+  console.log
+    Advanced tokenizer components initialized
+
+      at AdvancedTokenizer.initializeComponents (src/tokenizer/index.ts:108:13)
+
+  console.log
+    [2025-10-11T02:45:35.129Z] INFO [memory.initialize]: Memory initialized with 6 slots, 8 dimensions undefined
+
+      at StructuredLogger.log (src/logging.ts:109:17)
+
+  console.log
+    [2025-10-11T02:45:35.132Z] INFO [memory.initialize]: Research paper features enabled: momentum undefined
+
+      at StructuredLogger.log (src/logging.ts:109:17)
+
+  console.log
+    Initialized embedding matrix: [50000, 512]
+
+      at TokenEmbedding.initializeWeights (src/tokenizer/embedding.ts:75:13)
+
+  console.log
+    Advanced tokenizer components initialized
+
+      at AdvancedTokenizer.initializeComponents (src/tokenizer/index.ts:108:13)
+
+  console.log
+    [2025-10-11T02:45:35.542Z] INFO [memory.initialize]: Memory initialized with 6 slots, 8 dimensions undefined
+
+      at StructuredLogger.log (src/logging.ts:109:17)
+
+  console.log
+    [2025-10-11T02:45:35.544Z] INFO [memory.initialize]: Research paper features enabled: momentum undefined
+
+      at StructuredLogger.log (src/logging.ts:109:17)
+
+  console.log
+    Initialized embedding matrix: [50000, 512]
+
+      at TokenEmbedding.initializeWeights (src/tokenizer/embedding.ts:75:13)
+
+  console.log
+    Advanced tokenizer components initialized
+
+      at AdvancedTokenizer.initializeComponents (src/tokenizer/index.ts:108:13)
+
+  console.log
+    [2025-10-11T02:45:35.947Z] INFO [memory.initialize]: Memory initialized with 6 slots, 8 dimensions undefined
+
+      at StructuredLogger.log (src/logging.ts:109:17)
+
+  console.log
+    [2025-10-11T02:45:35.948Z] INFO [memory.initialize]: Research paper features enabled: momentum, forgetting-gate undefined
+
+      at StructuredLogger.log (src/logging.ts:109:17)
+
+  console.log
+    [2025-10-11T02:45:35.954Z] INFO [model]: Model resources disposed undefined
+
+      at StructuredLogger.log (src/logging.ts:109:17)
+
+  console.log
+    [2025-10-11T02:45:35.955Z] INFO [model]: Model resources disposed undefined
+
+      at StructuredLogger.log (src/logging.ts:109:17)
+
+(node:10025) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:10025) [DEP0044] DeprecationWarning: The `util.isArray` API is deprecated. Please use `Array.isArray()` instead.
+FAIL src/__tests__/momentum.test.ts
+  Momentum-Based Memory Updates
+    ✓ initializes momentum state with decay parameter (1 ms)
+    ✓ updates momentum state during training (23 ms)
+    ✓ momentum update reflects decay and gradient influence (5 ms)
+    ✕ momentum decay scaling responds to configuration (956 ms)
+    ✓ forgetting gate influences momentum application (373 ms)
+
+  ● Momentum-Based Memory Updates › momentum decay scaling responds to configuration
+
+    expect(received).toBeLessThan(expected)
+
+    Expected: < 8.738367540672698e-8
+    Received:   2.2156848444865318e-7
+
+      163 |     const lowNorm = runStep(lowDecayModel);
+      164 |
+    > 165 |     expect(highNorm).toBeLessThan(lowNorm);
+          |                      ^
+      166 |
+      167 |     highDecayModel.dispose();
+      168 |     lowDecayModel.dispose();
+
+      at Object.<anonymous> (src/__tests__/momentum.test.ts:165:22)
+
+Test Suites: 1 failed, 1 total
+Tests:       1 failed, 4 passed, 5 total
+Snapshots:   0 total
+Time:        2.552 s, estimated 4 s
+Ran all test suites matching /src\/__tests__\/momentum.test.ts/i.
+Force exiting Jest: Have you considered using `--detectOpenHandles` to detect async operations that kept running after all tests finished?

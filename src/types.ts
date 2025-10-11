@@ -76,12 +76,22 @@ export const TitanMemoryConfigSchema = z.object({
   surpriseDecay: z.number().min(0).max(1).default(0.9),
   pruningInterval: z.number().int().positive().default(1000),
   gradientClip: z.number().positive().default(1.0),
+
+  // Research Paper Extensions
+  enableMomentum: z.boolean().default(true).describe("Enable momentum-based memory updates"),
+  momentumDecayRate: z.number().min(0).max(1).default(0.9).describe("η_t: Momentum decay parameter"),
+  enableForgettingGate: z.boolean().default(false).describe("Enable learnable forgetting gate"),
+  forgettingGateInit: z.number().min(0).max(1).default(0.1).describe("α_t initial value"),
+  enableTokenFlow: z.boolean().default(true).describe("Enable token flow tracking"),
+  tokenFlowWindow: z.number().int().positive().default(10).describe("Token flow history window size"),
+  enableHierarchicalMemory: z.boolean().default(false).describe("Enable hierarchical memory tiers"),
 });
 
 export type TitanMemoryConfig = z.infer<typeof TitanMemoryConfigSchema>;
 
 /**
  * Interface for memory state in the Titans architecture.
+ * Extended to support research paper concepts: momentum-based updates and token flow tracking
  */
 export interface IMemoryState {
   shortTerm: ITensor;
@@ -90,6 +100,15 @@ export interface IMemoryState {
   timestamps: ITensor;
   accessCounts: ITensor;
   surpriseHistory: ITensor;
+
+  // Research Paper Extensions (Equations 32-33)
+  momentumState?: ITensor;      // S_t: Momentum term for memory updates
+  momentumDecay?: number;        // η_t: Momentum decay parameter
+  forgettingGate?: ITensor;      // α_t: Learnable forgetting gate parameter
+
+  // Token Flow Tracking (Section 3.1)
+  tokenFlowHistory?: ITensor;    // Sequential token dependency tracking
+  flowWeights?: ITensor;         // Weights for token flow contribution
 }
 
 /**
@@ -168,6 +187,7 @@ export interface IMemoryModel {
   trainStep(x_t: ITensor, x_next: ITensor, memoryState: IMemoryState): {
     loss: ITensor;
     gradients: IModelGradients;
+    memoryUpdate: IMemoryUpdateResult;
   };
 
   updateMetaMemory(surprise: ISurpriseMetrics, context: ITensor): ITensor;
@@ -322,31 +342,31 @@ export interface IExtendedMemoryState extends IMemoryState {
   workingMemory: tf.Tensor2D;      // Immediate, high-capacity buffer
   shortTermMemory: tf.Tensor2D;    // Temporary storage for recent items
   longTermMemory: tf.Tensor2D;     // Persistent storage for important items
-  
+
   // Episodic vs Semantic distinction
   episodicMemory: tf.Tensor2D;     // Time-bound, context-specific memories
   semanticMemory: tf.Tensor2D;     // Abstract, generalized knowledge
-  
+
   // Temporal information
   workingTimestamps: tf.Tensor1D;   // When items entered working memory
   shortTermTimestamps: tf.Tensor1D; // When items entered short-term memory
   longTermTimestamps: tf.Tensor1D;  // When items entered long-term memory
   episodicTimestamps: tf.Tensor1D;  // When episodic memories were formed
   semanticTimestamps: tf.Tensor1D;  // When semantic knowledge was consolidated
-  
+
   // Access patterns and confidence
   workingAccessCounts: tf.Tensor1D;
   shortTermAccessCounts: tf.Tensor1D;
   longTermAccessCounts: tf.Tensor1D;
   episodicAccessCounts: tf.Tensor1D;
   semanticAccessCounts: tf.Tensor1D;
-  
+
   // Memory quality metrics
   episodicRecency: tf.Tensor1D;     // Recency scores for episodic memories
   semanticConfidence: tf.Tensor1D;  // Confidence scores for semantic knowledge
   memoryImportance: tf.Tensor1D;    // Importance scores for promotion/demotion
   surpriseScores: tf.Tensor1D;      // Surprise scores for memory consolidation
-  
+
   // Memory type flags (0 = working, 1 = short-term, 2 = long-term, 3 = episodic, 4 = semantic)
   memoryTiers: tf.Tensor1D;
   memoryTypes: tf.Tensor1D;
@@ -360,24 +380,24 @@ export interface IMemoryStats {
   workingCount: number;
   shortTermCount: number;
   longTermCount: number;
-  
+
   // Type counts
   episodicCount: number;
   semanticCount: number;
-  
+
   // Memory utilization
   totalMemoryUsed: number;
   memoryUtilization: number; // percentage
-  
+
   // Quality metrics
   averageImportance: number;
   averageConfidence: number;
   averageRecency: number;
-  
+
   // Promotion/Demotion activity
   recentPromotions: number;
   recentDemotions: number;
-  
+
   // Temporal distribution
   oldestMemoryAge: number;
   newestMemoryAge: number;
@@ -394,7 +414,7 @@ export interface IMemoryPromotionRules {
     timeThreshold: number;       // minimum time in working memory (ms)
     importanceThreshold: number; // minimum importance score
   };
-  
+
   // Short-term memory → Long-term memory
   shortTermToLongTerm: {
     accessThreshold: number;
@@ -402,14 +422,14 @@ export interface IMemoryPromotionRules {
     importanceThreshold: number;
     reinforcementCount: number;  // number of reinforcements needed
   };
-  
+
   // Episodic → Semantic consolidation
   episodicToSemantic: {
     generalityThreshold: number; // how general/abstract the memory is
     confidenceThreshold: number; // confidence in the knowledge
     abstractionLevel: number;    // level of abstraction achieved
   };
-  
+
   // Demotion thresholds
   demotionRules: {
     lowAccessPenalty: number;    // penalty for infrequent access
@@ -427,13 +447,13 @@ export interface IRetrievalWeights {
     contextWeight: number;      // how much to weight contextual similarity
     emotionalWeight: number;    // how much to weight emotional significance
   };
-  
+
   semantic: {
     similarityWeight: number;   // how much to weight conceptual similarity
     confidenceWeight: number;   // how much to weight confidence scores
     generalityWeight: number;   // how much to weight general applicability
   };
-  
+
   // Combined retrieval weights
   combined: {
     episodicBias: number;       // bias toward episodic memories
@@ -490,7 +510,11 @@ export class MemoryError extends Error {
 export interface IMemoryModel {
   // Existing methods
   forward(x: ITensor, memoryState: IMemoryState): { predicted: ITensor; memoryUpdate: IMemoryUpdateResult };
-  trainStep(x_t: ITensor, x_next: ITensor, memoryState: IMemoryState): { loss: ITensor; gradients: IModelGradients };
+  trainStep(x_t: ITensor, x_next: ITensor, memoryState: IMemoryState): {
+    loss: ITensor;
+    gradients: IModelGradients;
+    memoryUpdate: IMemoryUpdateResult;
+  };
   pruneMemory(memoryState: IMemoryState, threshold: number): IMemoryState;
   manifoldStep(base: ITensor, velocity: ITensor): ITensor;
   getMemorySnapshot(): Record<string, tf.Tensor>;

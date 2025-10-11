@@ -20,5 +20,6 @@ test-weights.json
 memory.json
 package-lock.json
 dist/
+.cursor/
 .DS_Store
-
+SEAL

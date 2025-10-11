@@ -2,6 +2,7 @@ import type { Transport, CallToolRequest, CallToolResult } from './types.js';
 import WebSocket from 'ws';
 import * as readline from 'readline';
 import { z } from 'zod';
+import { StructuredLogger } from './logging.js';
 
 // Define request schema here since it's transport-specific
 const CallToolRequestSchema = z.object({
@@ -12,6 +13,7 @@ const CallToolRequestSchema = z.object({
 export class WebSocketTransport implements Transport {
   private ws: WebSocket;
   private requestHandler?: (request: CallToolRequest) => Promise<CallToolResult>;
+  private logger = StructuredLogger.getInstance();
 
   constructor(url: string) {
     this.ws = new WebSocket(url);
@@ -23,7 +25,7 @@ export class WebSocketTransport implements Transport {
       this.ws.onerror = (error) => reject(error);
 
       this.ws.onmessage = async (event) => {
-        if (!this.requestHandler) {return;}
+        if (!this.requestHandler) { return; }
         try {
           const rawRequest = JSON.parse(event.data.toString());
           const request = CallToolRequestSchema.parse(rawRequest); // Validate
@@ -55,6 +57,7 @@ export class WebSocketTransport implements Transport {
 export class StdioTransport implements Transport {
   private requestHandler?: (request: CallToolRequest) => Promise<CallToolResult>;
   private readline: readline.Interface;
+  private logger = StructuredLogger.getInstance();
 
   constructor() {
     this.readline = readline.createInterface({
@@ -66,20 +69,23 @@ export class StdioTransport implements Transport {
   async connect(): Promise<void> {
     this.readline.on('line', async (line: string) => {
       if (!this.requestHandler) {
-        console.error('No request handler registered');
+        this.logger.error('transport', 'No request handler registered');
         return;
       }
 
       try {
         const request = JSON.parse(line) as CallToolRequest;
         const response = await this.requestHandler(request);
-        console.log(JSON.stringify(response));
+        this.logger.info('transport', 'Response', { response });
+        process.stdout.write(`${JSON.stringify(response)}\n`);
       } catch (error) {
-        console.error('Error handling input:', error);
-        console.log(JSON.stringify({
-          success: false,
-          error: error instanceof Error ? error.message : 'Unknown error occurred'
-        }));
+        this.logger.error('transport', 'Error handling input', error as Error);
+        process.stdout.write(`${JSON.stringify({
+          id: null,
+          error: {
+            message: error instanceof Error ? error.message : String(error)
+          }
+        })}\n`);
       }
     });
 

@@ -1,5 +1,5 @@
 {
-  "name": "@henrymayo/titan-mcp",
+  "name": "@henryhawke/mcp-titan",
   "version": "3.0.0",
   "description": "A neural memory system for LLMs that can learn and predict sequences while maintaining state",
   "main": "dist/index.js",

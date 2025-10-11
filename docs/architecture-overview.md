@@ -1,76 +1,95 @@
 # Architecture Overview
 
-This document provides an overview of the architecture for the Titan Memory MCP Server, describing the key components involved in processing and managing memory for LLMs (Large Language Models).
+This document captures the relationships between the MCP transport, memory model, learner service, and workflow utilities that make up the Titan Memory server (state as of October 10, 2025).
 
----
-
-## System Architecture Diagram
+## Topology
 
 ```mermaid
-graph TD;
-    tokenizer[Tokenizer] --> embedding[Embedding]
-    embedding --> encoder[Encoder (TF-JS)]
-    encoder --> memory[Memory Retrieval]
-    memory --> decoder[Decoder]
-    decoder --> online[Online Update]
+graph TD
+    subgraph MCP Server
+        A[TitanMemoryServer]
+        B[McpServer API]
+        C[Tool Handlers]
+    end
+
+    subgraph Model Layer
+        D[TitanMemoryModel]
+        E[VectorProcessor]
+        F[TfIdfVectorizer]
+        G[AdvancedTokenizer]
+    end
+
+    subgraph Persistence
+        H[.titan_memory/model]
+        I[.titan_memory/memory_state.json]
+        J[User Checkpoints]
+    end
+
+    subgraph Learner
+        K[LearnerService]
+        L[Replay Buffer]
+        M[Gradient Accumulator]
+    end
+
+    subgraph Workflows
+        N[WorkflowOrchestrator]
+        O[GitHubWorkflowManager]
+        P[LintingManager]
+        Q[FeedbackProcessor]
+    end
+
+    A --> B --> C --> D
+    C --> K
+    D --> H
+    A --> I
+    C --> J
+    K --> D
+    N --> D
+    N --> O
+    N --> P
+    N --> Q
+    F --> D
+    E --> D
+    G --> D
 ```
 
----
+## MCP Transport & Lifecycle
+- **Entry point:** `TitanMemoryServer` (`src/index.ts`) instantiates `McpServer` with `StdioServerTransport`.
+- **Tool registration:** All MCP tools are bound inside the constructor, grouped into discovery, inference, training, persistence, and learner control.
+- **Auto-initialization:** On first request, `autoInitialize()` loads or creates model and memory files beneath `memoryPath` (defaults to `~/.titan_memory`). After initialization the server schedules an auto-save loop (60 second cadence, retry-once with 5 second delay).
+- **Shutdown:** Signal handlers flush memory state, dispose of TensorFlow resources, and tear down the learner loop.
 
-## Tokenizer
-**Function:**
-The tokenizer component is responsible for breaking down input text into manageable tokens. This allows the rest of the model to process data efficiently without dealing directly with natural language inputs.
+## Model Stack
+- **`TitanMemoryModel` (`src/model.ts`):** Transformer-inspired memory system with telemetry instrumentation, surprise metrics, and optional hierarchical/quantized state hooks.
+- **Memory State Representation:** `IMemoryState` (`src/types.ts`) wraps tensors for short-term, long-term, metadata, timestamps, access counts, and surprise history, plus optional momentum/flow fields.
+- **Vector Utilities:** `VectorProcessor` and `SafeTensorOps` enforce tensor validation and safe operations across the API surface.
+- **Memory Pruning:** `MemoryPruner` coordinates information-gain scoring and pruning thresholds consumed by the `prune_memory` MCP tool.
+- **TF-IDF Bootstrap:** `TfIdfVectorizer` seeds sparse fallbacks for `bootstrap_memory` to leverage when the neural model lacks context.
 
----
+## Learner Loop
+- **`LearnerService` (`src/learner.ts`):** Maintains a ring-buffer replay set, gradient accumulation, and configurable loss weighting (contrastive, next-token, MLM).
+- **Tokenizer Injection:** `init_learner` installs a mock tokenizer (random tensors) unless you swap in `AdvancedTokenizer`. Replace `server.tokenizer` before calling learner tools for deterministic embeddings.
+- **Control Surface:** Tools `init_learner`, `pause_learner`, `resume_learner`, `get_learner_stats`, and `add_training_sample` manage the learner state.
 
-## Embedding
-**Function:**
-Once tokenized, text is converted into vector embeddings. These embeddings represent the meaning of the text in a numerical format suitable for further processing.
+## Workflow Orchestration
+- `WorkflowOrchestrator` wires memory-backed analytics into GitHub automation, linting enforcement, and feedback processing. It depends on `WorkflowConfig` feature flags (`src/types.ts`) and on `TitanMemoryModel.storeWorkflowMemory` hooks.
+- `GitHubWorkflowManager`, `LintingManager`, and `FeedbackProcessor` (under `src/workflows/`) represent discrete workflow adapters. `WorkflowUtils` supplies shared helpers for credentials, retry policies, and telemetry scaffolding.
+- These modules are currently **experimental**—they are not invoked from the MCP server and require productionization (secure credential storage, rate limiting, retries, centralized logging) before deployment. Decide in Phase 5 whether to integrate or archive.
 
----
+## Persistence Contract
+- **Model artifacts:** Saved to `memoryPath/model/` using TensorFlow.js format. Auto-init writes once to ensure subsequent runs can load without reinitializing weights.
+- **Memory state:** Stored as JSON arrays of tensor data with shape metadata. `save_checkpoint`/`load_checkpoint` allow arbitrary paths within `memoryPath` or the current working directory (whitelisted by `validateFilePath`).
+- **Checkpoints include:** flattened tensor values, shape tuples, model config, and timestamp—enabling safe reloads after restarts.
 
-## Encoder (TF-JS)
-**Function:**
-The encoder, implemented using TensorFlow.js, processes the embeddings to extract features and create contextually relevant representations. These representations are essential for understanding the nuances of input data.
+## Data Flows
+1. **Tool Call:** MCP client invokes tool over stdio.
+2. **Validation:** Zod schemas ensure parameter correctness; invalid inputs return textual error messages.
+3. **Tensor Processing:** `VectorProcessor` and `TitanMemoryModel` convert inputs, manage memory state, and run inference/training.
+4. **Persistence:** Memory updates are written to in-memory tensors, optionally flushed to disk via auto-save or explicit checkpoint.
+5. **Learner Feedback:** When active, `LearnerService` polls the replay buffer on a fixed interval (`updateInterval`) and applies gradient updates back to the model.
 
----
-
-## Memory Retrieval
-**Function:**
-Using attention mechanisms and HNSW (Hierarchical Navigable Small World) algorithms, the system retrieves memory items relevant to the current context from long-term memory, enhancing decision-making and prediction accuracy.
-
----
-
-## Decoder
-**Function:**
-The decoder takes the refined context from the encoder and retrieved memory to generate coherent outputs. This step is critical in forming meaningful responses based on both input and context.
-
----
-
-## Online Update
-**Function:**
-This process involves updating the model in real-time, allowing it to adapt to new data and improve its performance continuously. The online update mechanism ensures that the model remains current with the latest information without needing full retraining.
-
----
-
-## Checkpoint Flow and MCP Tool Mapping
-
-### Checkpoint Flow
-1. **Save**: Memory state is periodically saved as checkpoints to ensure data persistence and facilitate recovery.
-2. **Load**: Checkpoints can be loaded to restore the model's state to a known good configuration.
-
-### MCP Tools Mapping
-- **`init_model`**: Initializes the model configuration.
-- **`save_checkpoint`**: Saves the current memory state to a file.
-- **`load_checkpoint`**: Loads a saved memory state file.
-- **`forward_pass`**: Processes data through the model to make predictions.
-- **`train_step`**: Updates model based on new data inputs.
-- **`get_memory_state`**: Retrieves current memory statistics.
-- **`prune_memory`**: Cleans up older or less useful memories to optimize performance.
-
----
-
-## Additional Information
-For more detailed guidance on system prompts, consult the [LLM System Prompt Documentation](llm-system-prompt.md).
-
----
+## Related Documentation
+- [docs/api/README.md](api/README.md) — detailed tool reference and schema defaults.
+- [README.md](../README.md) — quick start, integration notes, and feature summary.
+- [ROADMAP_ANALYSIS.md](../ROADMAP_ANALYSIS.md) — strategic roadmap and open gaps.
+- [IMPLEMENTATION_COMPLETE.md](../IMPLEMENTATION_COMPLETE.md) — delivery checklist and next steps.

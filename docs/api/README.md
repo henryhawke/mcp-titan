@@ -1,196 +1,138 @@
-# Titan Memory MCP Server API Documentation
+# Titan Memory MCP Server API
+
+Updated October 10, 2025 to reflect the current stdio-based implementation that ships with version 3.0.0 of `@henryhawke/mcp-titan` (server advertises `Titan Memory` v1.2.0).
 
 ## Overview
+- **Transport:** Model Context Protocol over stdio (`StdioServerTransport`). No HTTP endpoints are exposed in this build.
+- **Persistence:** Memory state and model artifacts live under `~/.titan_memory/` by default. The server auto-saves every 60 seconds and reloads on startup when files exist.
+- **Model stack:** `TitanMemoryModel` backed by TensorFlow.js (Node backend) with optional learner loop and tokenizer services.
+- **Source of truth:** All schema definitions are in `src/index.ts`, `src/types.ts`, and `src/learner.ts`. See [docs/architecture-overview.md](../architecture-overview.md) for a component map.
 
-The Titan Memory MCP Server provides a neural memory system that can learn and predict sequences while maintaining state through a memory vector. This document details the available tools and their usage.
-
-## Connection
-
-### Cursor Integration
-
-To use the server with Cursor IDE:
-
-1. Install the server:
+## Requirements & Installation
+- Node.js **22.0.0 or newer** (per `package.json` engines field).
+- Native dependencies from `@tensorflow/tfjs-node`; install prerequisites for your platform before running `npm install`.
+- Optional: network access for dataset/scripts in `scripts/` when using the trainer pipeline.
 
 ```bash
 npm install -g @henryhawke/mcp-titan
+# or run locally
+npm install
 ```
 
-2. Add to Cursor's MCP configuration (`~/.cursor/settings.json`):
+## Running the Server
+- CLI entry point: `titan-memory` (see the package `bin` field).
+- Local development: `npm start` (loads `dist/index.js`, which invokes the stdio server).
+- The process communicates over stdio. Keep it attached to the MCP client or wrap it with a supervisor that forwards stdio.
+
+```bash
+# one-off execution
+npx titan-memory
+
+# development rebuild + run
+npm run build && npm start
+```
+
+### Cursor MCP Configuration Example
 
 ```json
 {
   "mcp": {
     "servers": {
       "titan-memory": {
-        "command": "mcp-titan",
+        "command": "titan-memory",
         "env": {
           "NODE_ENV": "production"
-        }
+        },
+        "workingDirectory": "~/.titan_memory"
       }
     }
   }
 }
 ```
 
-3. Restart Cursor IDE
-4. Use `Cmd/Ctrl + Shift + P` and type "MCP: Restart Servers" to initialize
+Adjust `workingDirectory` if you need the checkpoints elsewhere. See [README.md](../../README.md) for additional client notes.
 
-## Available Tools
+## Tool Registry Snapshot
+Seventeen tools are registered in `src/index.ts` via `this.server.tool`. The help output will be refreshed to match this table; use `help` for live confirmation.
 
-### process_input
+| Tool | Category | Summary | Key Parameters (defaults) |
+| --- | --- | --- | --- |
+| `help` | discovery | Lists tools and optional details | `tool?: string`, `category?: string`, `showExamples?: boolean`, `verbose?: boolean` |
+| `bootstrap_memory` | onboarding | Seeds memory from URL or raw corpus, builds TF-IDF fallback vectors | `source: string (URL or plain text)` |
+| `init_model` | lifecycle | Creates/initializes `TitanMemoryModel` | See [`TitanMemoryConfig` defaults](#titanmemoryconfig-defaults) |
+| `memory_stats` | observability | Returns raw memory state snapshot via `model.getMemoryState()` | none |
+| `forward_pass` | inference | Runs `model.forward` with automatic memory update | `x: string | number[]`, `memoryState?: IMemoryState` |
+| `train_step` | training | Executes supervised step between current/next tensors | `x_t`, `x_next` (string or numeric array) |
+| `get_memory_state` | observability | Provides formatted stats + quick health check | none |
+| `get_token_flow_metrics` | observability | Summarizes token flow window, weights, and variance when enabled | none |
+| `reset_gradients` | training | Calls `model.resetGradients()` | none |
+| `prune_memory` | maintenance | Invokes `model.pruneMemoryByInformationGain` when available | `threshold?: number (0–1)`, `force?: boolean (default false)` |
+| `save_checkpoint` | persistence | Serializes tensors + config to disk | `path: string` (resolved/sanitized) |
+| `load_checkpoint` | persistence | Loads checkpoint file, validates dimensionality | `path: string` |
+| `init_learner` | learner loop | Creates `LearnerService` with mock tokenizer unless one exists | see [`LearnerConfig` defaults](#learnerservice-defaults) |
+| `pause_learner` | learner loop | Stops the training interval | none |
+| `resume_learner` | learner loop | Restarts the training interval | none |
+| `get_learner_stats` | learner loop | Dumps buffer size, loss metrics, and running status | none |
+| `add_training_sample` | learner loop | Pushes sample(s) into replay buffer | `input`, `target`, optional `positive`, `negative` (string or numeric array) |
 
-Process text input and update the memory state.
+> **Note:** `manifold_step`, `encode_text`, `get_surprise_metrics`, `analyze_memory`, and `predict_next` are roadmap items. They are referenced in strategy docs but have no MCP handlers today.
 
-#### Parameters
+### `TitanMemoryConfig` Defaults
+The `init_model` schema ultimately uses the `TitanMemoryConfigSchema` from `src/types.ts` with these defaults:
 
-```typescript
-{
-  text: string;      // Required: Input text to process
-  context?: string;  // Optional: Additional context
-}
-```
+| Field | Default |
+| --- | --- |
+| `inputDim` | `768`
+| `hiddenDim` | `512`
+| `memoryDim` | `1024`
+| `transformerLayers` | `6` (max 12 enforced by schema)
+| `numHeads` | `8`
+| `ffDimension` | `2048`
+| `dropoutRate` | `0.1`
+| `maxSequenceLength` | `512`
+| `memorySlots` | `5000`
+| `similarityThreshold` | `0.65`
+| `surpriseDecay` | `0.9`
+| `pruningInterval` | `1000`
+| `gradientClip` | `1.0`
+| `enableMomentum` | `true`
+| `momentumDecayRate` | `0.9`
+| `enableForgettingGate` | `false`
+| `forgettingGateInit` | `0.1`
+| `enableTokenFlow` | `true`
+| `tokenFlowWindow` | `10`
+| `enableHierarchicalMemory` | `false`
 
-#### Response
+### `LearnerService` Defaults
+When `init_learner` runs without overrides, it instantiates `LearnerService` with:
 
-```typescript
-{
-  surprise: number; // Surprise level (0-1)
-  memoryUpdated: boolean; // Whether memory was updated
-  insight: string; // Human-readable insight
-}
-```
+| Field | Default |
+| --- | --- |
+| `bufferSize` | `10000`
+| `batchSize` | `32`
+| `updateInterval` | `1000` ms
+| `gradientClipValue` | `1.0`
+| `contrastiveWeight` | `0.2`
+| `nextTokenWeight` | `0.4`
+| `mlmWeight` | `0.4`
+| `accumulationSteps` | `4`
+| `learningRate` | `0.0001`
+| `nanGuardThreshold` | `1e-6`
 
-#### Example
+By default, `init_learner` injects a lightweight mock tokenizer that produces random vectors. Replace `this.tokenizer` on the `TitanMemoryServer` instance if you want deterministic encodings before adding training samples.
 
-```typescript
-const result = await callTool("process_input", {
-  text: "function calculateSum(a, b) { return a + b; }",
-  context: "JavaScript arithmetic function",
-});
-```
+## Persistence & Auto-Initialization
+- On launch, the server ensures `~/.titan_memory/` exists, then looks for `model/model.json` and `memory_state.json` under that directory.
+- If a trained model is present, it loads it; otherwise it initializes a fresh model using the defaults above and immediately saves the artifact for future sessions.
+- Checkpoints written via `save_checkpoint` include tensor shapes for validation during `load_checkpoint` and store the current model config alongside the flattened memory arrays.
 
-### get_memory_state
+## Error Handling Notes
+- All tool handlers bubble readable error messages through MCP responses; failed operations return a `text` payload with context.
+- `prune_memory` and learner tools first check that the underlying optional capabilities exist (`pruneMemoryByInformationGain`, `LearnerService` respectively) before acting.
 
-Retrieve the current memory state and statistics.
-
-#### Parameters
-
-None required.
-
-#### Response
-
-```typescript
-{
-  memoryStats: {
-    mean: number; // Mean of memory vector
-    std: number; // Standard deviation
-  }
-  memorySize: number; // Size of memory vector
-  status: string; // Current status
-}
-```
-
-#### Example
-
-```typescript
-const state = await callTool("get_memory_state", {});
-```
-
-## HTTP API
-
-The server also exposes HTTP endpoints for non-MCP integrations.
-
-### GET /
-
-Returns server information and status.
-
-#### Response
-
-```json
-{
-  "name": "Titan Memory MCP Server",
-  "version": "0.1.0",
-  "description": "Automatic memory-augmented learning for Cursor",
-  "status": "active",
-  "memoryPath": "~/.cursor/titan-memory"
-}
-```
-
-### POST /mcp
-
-MCP protocol endpoint for tool execution.
-
-#### Request
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/call",
-  "params": {
-    "name": "process_input",
-    "arguments": {
-      "text": "Sample input text"
-    }
-  },
-  "id": 1
-}
-```
-
-## Error Handling
-
-The server uses standard MCP error codes:
-
-- `INVALID_REQUEST`: Malformed request
-- `METHOD_NOT_FOUND`: Unknown tool requested
-- `INVALID_PARAMS`: Invalid tool parameters
-- `INTERNAL_ERROR`: Server-side error
-
-Example error response:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32602,
-    "message": "Invalid params: text is required"
-  },
-  "id": 1
-}
-```
-
-## Memory Management
-
-The server automatically:
-
-- Saves memory state every 5 minutes
-- Persists memory to `~/.cursor/titan-memory/memory.json`
-- Cleans up tensors to prevent memory leaks
-- Handles process termination gracefully
-
-## Performance Considerations
-
-- Memory vector size: 768 dimensions
-- Auto-save interval: 5 minutes
-- Uses TensorFlow.js for efficient tensor operations
-- Dynamic port allocation for HTTP server
-
-## Security Notes
-
-- Server runs locally only
-- File access restricted to `~/.cursor/titan-memory`
-- No external network calls
-- Environment variables sanitized
-
-## Debugging
-
-Enable debug logging:
-
-```bash
-DEBUG=mcp-titan* mcp-titan
-```
-
-Log files location:
-
-- Server logs: `~/.cursor/titan-memory/logs/server.log`
-- Memory state: `~/.cursor/titan-memory/memory.json`
+## Related Documentation
+- [docs/architecture-overview.md](../architecture-overview.md) — component relationships and data flow.
+- [ROADMAP_ANALYSIS.md](../../ROADMAP_ANALYSIS.md) — planned enhancements, including outstanding tool gaps and workflow integration.
+- [SYSTEM_AUDIT.md](../../SYSTEM_AUDIT.md) — consolidated audit findings and action tracker.
+- [IMPLEMENTATION_COMPLETE.md](../../IMPLEMENTATION_COMPLETE.md) — current delivery scope and next actions.
+- [IMPLEMENTATION_PACKAGE.md](../../IMPLEMENTATION_PACKAGE.md) — navigation guide for documentation and feature work.

@@ -4,4 +4,9 @@ export function isNullOrUndefined(value: any): boolean {
 }
 
 // Make it available globally for TensorFlow.js
-(global as any).isNullOrUndefined = isNullOrUndefined; 
+(global as any).isNullOrUndefined = isNullOrUndefined;
+
+// Minimal performance.now polyfill for environments missing it
+if (!(globalThis as any).performance) {
+    (globalThis as any).performance = { now: () => Date.now() } as any;
+} 
