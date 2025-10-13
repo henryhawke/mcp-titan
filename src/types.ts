@@ -108,12 +108,12 @@ export interface IMemoryState {
 
   // Research Paper Extensions (Equations 32-33)
   momentumState?: ITensor;      // S_t: Momentum term for memory updates
-  momentumDecay?: number;        // η_t: Momentum decay parameter
-  forgettingGate?: ITensor;      // α_t: Learnable forgetting gate parameter
+  momentumDecay?: number;       // η_t: Momentum decay parameter
+  forgettingGate?: ITensor;     // α_t: Learnable forgetting gate parameter
 
   // Token Flow Tracking (Section 3.1)
-  tokenFlowHistory?: ITensor;    // Sequential token dependency tracking
-  flowWeights?: ITensor;         // Weights for token flow contribution
+  tokenFlowHistory?: ITensor;   // Sequential token dependency tracking
+  flowWeights?: ITensor;        // Weights for token flow contribution
 }
 
 /**
@@ -576,6 +576,27 @@ export interface IHierarchicalMemoryStateInternal {
   timestamps: tf.Tensor[];
   accessCounts: tf.Tensor[];
   surpriseScores: tf.Tensor[];
+}
+
+export interface SerializedTensor {
+  data: number[];
+  shape: number[];
+}
+
+export interface SerializedHierarchicalMemoryState {
+  levels: SerializedTensor[];
+  timestamps: SerializedTensor[];
+  accessCounts: SerializedTensor[];
+  surpriseScores: SerializedTensor[];
+}
+
+export interface SerializedExtendedMemoryState {
+  tensors: Record<string, SerializedTensor>;
+}
+
+export interface SerializedAuxiliaryMemoryState {
+  hierarchicalMemory?: SerializedHierarchicalMemoryState;
+  extendedMemory?: SerializedExtendedMemoryState;
 }
 
 /**

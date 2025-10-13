@@ -6,7 +6,7 @@ import './utils/polyfills.js';
  */
 
 import * as tf from '@tensorflow/tfjs-node';
-import type { ITensor, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, IMemoryModel, ITelemetryData, IHierarchicalMemoryStateInternal, IQuantizedMemoryStateInternal, IMemoryPromotionRules, IRetrievalWeights } from './types.js';
+import type { ITensor, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, IMemoryModel, ITelemetryData, IHierarchicalMemoryStateInternal, IQuantizedMemoryStateInternal, IMemoryPromotionRules, IRetrievalWeights, SerializedAuxiliaryMemoryState, SerializedTensor } from './types.js';
 import { unwrapTensor, wrapTensor, TensorError, MemoryError, type IHierarchicalMemoryState, type IExtendedMemoryState, type IQuantizedMemoryState } from './types.js';
 import * as fs from 'fs/promises';
 import { z } from 'zod';
@@ -233,6 +233,27 @@ const safeLog = (message: string, metadata?: Record<string, any>) => {
 function flattenToNumberArray(arr: any): number[] {
   return (arr as any[]).flat(Infinity).filter((v): v is number => typeof v === 'number');
 }
+
+const BASE_MEMORY_KEYS = new Set<string>([
+  'shortTerm',
+  'longTerm',
+  'meta',
+  'timestamps',
+  'accessCounts',
+  'surpriseHistory',
+  'momentumState',
+  'momentumDecay',
+  'forgettingGate',
+  'tokenFlowHistory',
+  'flowWeights'
+]);
+
+const serializeTensor = (tensor: tf.Tensor): SerializedTensor => ({
+  data: Array.from(tensor.dataSync()),
+  shape: [...tensor.shape]
+});
+
+const deserializeTensor = (serialized: SerializedTensor): tf.Tensor => tf.tensor(serialized.data, serialized.shape);
 
 export class TitanMemoryModel implements IMemoryModel {
   private config: TitanMemoryConfig = ModelConfigSchema.parse({});
@@ -3381,6 +3402,84 @@ export class TitanMemoryModel implements IMemoryModel {
     }
 
     return state;
+  }
+
+  public exportAuxiliaryState(): SerializedAuxiliaryMemoryState {
+    const result: SerializedAuxiliaryMemoryState = {};
+
+    if ((this.config.useHierarchicalMemory || this.config.enableHierarchicalMemory) && this.hierarchicalMemory) {
+      const hierarchical = this.hierarchicalMemory;
+      result.hierarchicalMemory = {
+        levels: hierarchical.levels.map(level => serializeTensor(level)),
+        timestamps: hierarchical.timestamps.map(ts => serializeTensor(ts)),
+        accessCounts: hierarchical.accessCounts.map(ac => serializeTensor(ac)),
+        surpriseScores: hierarchical.surpriseScores.map(ss => serializeTensor(ss))
+      };
+    }
+
+    if (this.config.enableEpisodicSemanticDistinction && this.extendedMemoryState) {
+      const tensors: Record<string, SerializedTensor> = {};
+      Object.entries(this.extendedMemoryState).forEach(([key, value]) => {
+        if (BASE_MEMORY_KEYS.has(key)) {
+          return;
+        }
+        if (value instanceof tf.Tensor) {
+          tensors[key] = serializeTensor(value);
+        }
+      });
+
+      if (Object.keys(tensors).length > 0) {
+        result.extendedMemory = { tensors };
+      }
+    }
+
+    return result;
+  }
+
+  public restoreAuxiliaryState(state: SerializedAuxiliaryMemoryState | null | undefined): void {
+    if (!state) {
+      return;
+    }
+
+    if (state.hierarchicalMemory && (this.config.useHierarchicalMemory || this.config.enableHierarchicalMemory)) {
+      if (this.hierarchicalMemory) {
+        this.hierarchicalMemory.levels.forEach(tensor => { if (!tensor.isDisposed) { tensor.dispose(); } });
+        this.hierarchicalMemory.timestamps.forEach(tensor => { if (!tensor.isDisposed) { tensor.dispose(); } });
+        this.hierarchicalMemory.accessCounts.forEach(tensor => { if (!tensor.isDisposed) { tensor.dispose(); } });
+        this.hierarchicalMemory.surpriseScores.forEach(tensor => { if (!tensor.isDisposed) { tensor.dispose(); } });
+      }
+
+      const { levels, timestamps, accessCounts, surpriseScores } = state.hierarchicalMemory;
+      this.hierarchicalMemory = {
+        levels: levels.map(info => deserializeTensor(info)),
+        timestamps: timestamps.map(info => deserializeTensor(info)),
+        accessCounts: accessCounts.map(info => deserializeTensor(info)),
+        surpriseScores: surpriseScores.map(info => deserializeTensor(info))
+      };
+    }
+
+    if (state.extendedMemory && this.config.enableEpisodicSemanticDistinction) {
+      if (this.extendedMemoryState) {
+        Object.entries(this.extendedMemoryState).forEach(([key, value]) => {
+          if (BASE_MEMORY_KEYS.has(key)) {
+            return;
+          }
+          if (value instanceof tf.Tensor && !value.isDisposed) {
+            value.dispose();
+          }
+        });
+      }
+
+      const tensors: Record<string, tf.Tensor> = {};
+      Object.entries(state.extendedMemory.tensors).forEach(([key, serialized]) => {
+        tensors[key] = deserializeTensor(serialized);
+      });
+
+      this.extendedMemoryState = {
+        ...this.memoryState,
+        ...(tensors as Partial<IExtendedMemoryState>)
+      } as IExtendedMemoryState;
+    }
   }
 
   public resetMemory(): void {

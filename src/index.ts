@@ -7,8 +7,12 @@ import * as tf from '@tensorflow/tfjs-node';
 import type { TensorContainer } from '@tensorflow/tfjs-core';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createRequire } from 'module';
 
-import type { IMemoryState } from './types.js';
+const require = createRequire(import.meta.url);
+const packageJson = require('../package.json') as { version?: string };
+
+import type { IMemoryState, SerializedAuxiliaryMemoryState } from './types.js';
 import { wrapTensor, unwrapTensor } from './types.js';
 import { TitanMemoryModel } from './model.js';
 export { TitanMemoryModel } from './model.js';
@@ -27,12 +31,20 @@ import { StructuredLogger, LogLevel } from './logging.js';
  * Represents a serialized memory state that can be stored and loaded.
  */
 interface SerializedMemoryState {
+  shapes: Record<string, number[]>;
   shortTerm: number[];
   longTerm: number[];
   meta: number[];
   timestamps: number[];
   accessCounts: number[];
   surpriseHistory: number[];
+  momentumState?: number[];
+  momentumDecay?: number;
+  forgettingGate?: number[];
+  tokenFlowHistory?: number[];
+  flowWeights?: number[];
+  auxiliary?: SerializedAuxiliaryMemoryState;
+  timestamp?: number;
 }
 
 /**
@@ -47,6 +59,9 @@ interface MemoryStats {
   surpriseScore: number;
   patternDiversity: number;
 }
+
+const versionFromPackage = typeof packageJson.version === 'string' ? packageJson.version : '0.0.0';
+export const TITAN_MEMORY_VERSION = versionFromPackage;
 
 /**
  * Titan Memory Server - A neural memory system that can learn and predict sequences
@@ -64,11 +79,12 @@ export class TitanMemoryServer {
   private readonly memoryPath: string;
   private readonly modelDir: string;
   private logger: StructuredLogger;
+  private readonly toolDescriptions = new Map<string, string>();
 
   constructor(options: { memoryPath?: string } = {}) {
     this.server = new McpServer({
       name: "Titan Memory",
-      version: "1.2.0",
+      version: TITAN_MEMORY_VERSION,
       description: "A neural memory system for LLMs that can learn and predict sequences while maintaining state"
     });
     this.vectorProcessor = VectorProcessor.getInstance();
@@ -80,21 +96,148 @@ export class TitanMemoryServer {
     this.logger.setLogLevel(process.env.LOG_LEVEL === 'DEBUG' ? LogLevel.DEBUG : LogLevel.INFO);
     this.logger.info('server', 'TitanMemoryServer initialized', {
       memoryPath: this.memoryPath,
-      version: '3.0.0'
+      version: TITAN_MEMORY_VERSION
     });
 
     this.registerTools();
   }
 
+  private registerToolDefinition(
+    name: string,
+    description: string,
+    schema: any,
+    handler: (params: any) => Promise<any> | any
+  ): void {
+    this.toolDescriptions.set(name, description);
+    this.server.tool(name, description, schema, handler);
+  }
+
   private initializeEmptyState(): IMemoryState {
-    return tf.tidy(() => ({
-      shortTerm: wrapTensor(tf.tensor2d([], [0, this.model?.getConfig()?.memoryDim ?? 1024])),
-      longTerm: wrapTensor(tf.tensor2d([], [0, this.model?.getConfig()?.memoryDim ?? 1024])),
-      meta: wrapTensor(tf.tensor2d([], [0, 5])),
-      timestamps: wrapTensor(tf.tensor1d([])),
-      accessCounts: wrapTensor(tf.tensor1d([])),
-      surpriseHistory: wrapTensor(tf.tensor1d([]))
-    }));
+    return tf.tidy(() => {
+      const config = this.model?.getConfig();
+      const memoryDim = config?.memoryDim ?? 1024;
+      const memorySlots = config?.memorySlots ?? 5000;
+      const tokenFlowWindow = config?.tokenFlowWindow ?? 10;
+
+      const state: IMemoryState = {
+        shortTerm: wrapTensor(tf.tensor2d([], [0, memoryDim])),
+        longTerm: wrapTensor(tf.tensor2d([], [0, memoryDim])),
+        meta: wrapTensor(tf.tensor2d([], [0, 5])),
+        timestamps: wrapTensor(tf.tensor1d([])),
+        accessCounts: wrapTensor(tf.tensor1d([])),
+        surpriseHistory: wrapTensor(tf.tensor1d([]))
+      };
+
+      if (config?.enableMomentum) {
+        state.momentumState = wrapTensor(tf.zeros([memorySlots, memoryDim]));
+        state.momentumDecay = config.momentumDecayRate;
+      }
+
+      if (config?.enableForgettingGate) {
+        state.forgettingGate = wrapTensor(tf.zeros([memorySlots]));
+      }
+
+      if (config?.enableTokenFlow) {
+        state.tokenFlowHistory = wrapTensor(tf.zeros([tokenFlowWindow, memoryDim]));
+        state.flowWeights = wrapTensor(tf.zeros([tokenFlowWindow]));
+      }
+
+      return state;
+    });
+  }
+
+  private serializeMemoryState(): SerializedMemoryState {
+    const shapes: Record<string, number[]> = {
+      shortTerm: unwrapTensor(this.memoryState.shortTerm).shape,
+      longTerm: unwrapTensor(this.memoryState.longTerm).shape,
+      meta: unwrapTensor(this.memoryState.meta).shape,
+      timestamps: unwrapTensor(this.memoryState.timestamps).shape,
+      accessCounts: unwrapTensor(this.memoryState.accessCounts).shape,
+      surpriseHistory: unwrapTensor(this.memoryState.surpriseHistory).shape
+    };
+
+    if (this.memoryState.momentumState) {
+      shapes.momentumState = unwrapTensor(this.memoryState.momentumState).shape;
+    }
+    if (this.memoryState.forgettingGate) {
+      shapes.forgettingGate = unwrapTensor(this.memoryState.forgettingGate).shape;
+    }
+    if (this.memoryState.tokenFlowHistory) {
+      shapes.tokenFlowHistory = unwrapTensor(this.memoryState.tokenFlowHistory).shape;
+    }
+    if (this.memoryState.flowWeights) {
+      shapes.flowWeights = unwrapTensor(this.memoryState.flowWeights).shape;
+    }
+
+    const serialized: SerializedMemoryState = {
+      shapes,
+      shortTerm: Array.from(unwrapTensor(this.memoryState.shortTerm).dataSync()),
+      longTerm: Array.from(unwrapTensor(this.memoryState.longTerm).dataSync()),
+      meta: Array.from(unwrapTensor(this.memoryState.meta).dataSync()),
+      timestamps: Array.from(unwrapTensor(this.memoryState.timestamps).dataSync()),
+      accessCounts: Array.from(unwrapTensor(this.memoryState.accessCounts).dataSync()),
+      surpriseHistory: Array.from(unwrapTensor(this.memoryState.surpriseHistory).dataSync())
+    };
+
+    if (this.memoryState.momentumState) {
+      serialized.momentumState = Array.from(unwrapTensor(this.memoryState.momentumState).dataSync());
+    }
+    if (typeof this.memoryState.momentumDecay === 'number') {
+      serialized.momentumDecay = this.memoryState.momentumDecay;
+    }
+    if (this.memoryState.forgettingGate) {
+      serialized.forgettingGate = Array.from(unwrapTensor(this.memoryState.forgettingGate).dataSync());
+    }
+    if (this.memoryState.tokenFlowHistory) {
+      serialized.tokenFlowHistory = Array.from(unwrapTensor(this.memoryState.tokenFlowHistory).dataSync());
+    }
+    if (this.memoryState.flowWeights) {
+      serialized.flowWeights = Array.from(unwrapTensor(this.memoryState.flowWeights).dataSync());
+    }
+
+    const auxiliary = this.model?.exportAuxiliaryState();
+    if (auxiliary && (auxiliary.hierarchicalMemory || auxiliary.extendedMemory)) {
+      serialized.auxiliary = auxiliary;
+    }
+
+    return serialized;
+  }
+
+  private restoreSerializedMemoryState(state: SerializedMemoryState): void {
+    const shapes = state.shapes ?? {};
+
+    this.memoryState = tf.tidy(() => {
+      const restored: IMemoryState = {
+        shortTerm: wrapTensor(tf.tensor2d(state.shortTerm, shapes.shortTerm as [number, number] ?? [state.shortTerm.length, 1])),
+        longTerm: wrapTensor(tf.tensor2d(state.longTerm, shapes.longTerm as [number, number] ?? [state.longTerm.length, 1])),
+        meta: wrapTensor(tf.tensor2d(state.meta, shapes.meta as [number, number] ?? [state.meta.length, 1])),
+        timestamps: wrapTensor(tf.tensor1d(state.timestamps)),
+        accessCounts: wrapTensor(tf.tensor1d(state.accessCounts)),
+        surpriseHistory: wrapTensor(tf.tensor1d(state.surpriseHistory))
+      };
+
+      if (state.momentumState && shapes.momentumState) {
+        restored.momentumState = wrapTensor(tf.tensor2d(state.momentumState, shapes.momentumState as [number, number]));
+      }
+      if (typeof state.momentumDecay === 'number') {
+        restored.momentumDecay = state.momentumDecay;
+      }
+      if (state.forgettingGate && shapes.forgettingGate) {
+        restored.forgettingGate = wrapTensor(tf.tensor(state.forgettingGate, shapes.forgettingGate));
+      }
+      if (state.tokenFlowHistory && shapes.tokenFlowHistory) {
+        restored.tokenFlowHistory = wrapTensor(tf.tensor2d(state.tokenFlowHistory, shapes.tokenFlowHistory as [number, number]));
+      }
+      if (state.flowWeights && shapes.flowWeights) {
+        restored.flowWeights = wrapTensor(tf.tensor(state.flowWeights, shapes.flowWeights));
+      }
+
+      return restored;
+    });
+
+    if (state.auxiliary) {
+      this.model?.restoreAuxiliaryState(state.auxiliary);
+    }
   }
 
   private wrapWithMemoryManagement<T extends TensorContainer>(fn: () => T): T {
@@ -148,39 +291,36 @@ export class TitanMemoryServer {
 
   private registerTools(): void {
     // Help tool
-    this.server.tool(
+    this.registerToolDefinition(
       'help',
       "Get help about available tools",
-      {
+      z.object({
         tool: z.string().optional().describe("Specific tool name to get help for"),
         category: z.string().optional().describe("Category of tools to explore"),
         showExamples: z.boolean().optional().describe("Include usage examples"),
         verbose: z.boolean().optional().describe("Include detailed descriptions")
-      },
-      async () => {
+      }),
+      async (params: { tool?: string }) => {
         await this.ensureInitialized();
-        const helpText = [
-          "Available tools:",
-          "- help: Get help about available tools",
-          "- bootstrap_memory: Seed memory with TF-IDF summaries from URL or text",
-          "- init_model: Initialize the Titan Memory model",
-          "- memory_stats: Dump raw memory tensors and statistics",
-          "- forward_pass: Perform a forward pass through the model",
-          "- train_step: Execute a training step",
-          "- get_memory_state: Summarize memory health metrics",
-          "- get_token_flow_metrics: Inspect recent token flow weights (when enabled)",
-          "- reset_gradients: Reset accumulated gradients",
-          "- prune_memory: Remove less relevant memories",
-          "- save_checkpoint: Save memory state to file",
-          "- load_checkpoint: Load memory state from file",
-          "- init_learner: Configure the online learner loop",
-          "- pause_learner: Pause the online learner",
-          "- resume_learner: Resume the online learner",
-          "- get_learner_stats: Retrieve learner loop statistics",
-          "- add_training_sample: Add samples to the replay buffer",
-          "- health_check: Get system health status and diagnostics",
-          "- get_hierarchical_metrics: Get hierarchical memory promotion/demotion statistics"
-        ].join("\n");
+
+        const entries = Array.from(this.toolDescriptions.entries()).sort((a, b) =>
+          a[0].localeCompare(b[0])
+        );
+
+        let helpText: string;
+        if (params?.tool) {
+          const match = entries.find(([name]) => name === params.tool);
+          helpText = match
+            ? `${match[0]}: ${match[1]}`
+            : `Tool "${params.tool}" is not registered.`;
+        } else {
+          const lines = [
+            "Available tools:",
+            ...entries.map(([name, description]) => `- ${name}: ${description}`)
+          ];
+          helpText = lines.join('\n');
+        }
+
         return {
           content: [{
             type: "text",
@@ -191,12 +331,12 @@ export class TitanMemoryServer {
     );
 
     // Bootstrap memory tool
-    this.server.tool(
+    this.registerToolDefinition(
       'bootstrap_memory',
       "Initialize memory and train tokenizer based on a given URL or text corpus",
-      {
+      z.object({
         source: z.union([z.string().url(), z.string()]).describe("URL or text corpus")
-      },
+      }),
       async (params) => {
         try {
           // Example logic to fetch data and initialize memory
@@ -265,9 +405,10 @@ export class TitanMemoryServer {
     );
 
     // Init model tool
-    this.server.tool(
+    this.registerToolDefinition(
       'init_model',
-      {
+      "Initialize the Titan Memory model",
+      z.object({
         inputDim: z.number().int().positive().default(768).describe("Input dimension size"),
         hiddenDim: z.number().int().positive().default(512).describe("Hidden dimension size"),
         memoryDim: z.number().int().positive().default(1024).describe("Memory dimension size"),
@@ -281,7 +422,7 @@ export class TitanMemoryServer {
         surpriseDecay: z.number().min(0).max(1).default(0.9).describe("Surprise decay rate"),
         pruningInterval: z.number().int().positive().default(1000).describe("Pruning interval"),
         gradientClip: z.number().positive().default(1.0).describe("Gradient clipping value")
-      },
+      }),
       async (params) => {
         try {
           this.model = new TitanMemoryModel();
@@ -298,7 +439,10 @@ export class TitanMemoryServer {
             similarityThreshold: params.similarityThreshold ?? 0.65,
             surpriseDecay: params.surpriseDecay ?? 0.9,
             pruningInterval: params.pruningInterval ?? 1000,
-            gradientClip: params.gradientClip ?? 1.0
+            gradientClip: params.gradientClip ?? 1.0,
+            enableHierarchicalMemory: true,
+            useHierarchicalMemory: true,
+            enableEpisodicSemanticDistinction: true
           };
 
           await this.model.initialize(config);
@@ -324,29 +468,41 @@ export class TitanMemoryServer {
     );
 
     // Memory stats tool
-    this.server.tool(
+    this.registerToolDefinition(
       'memory_stats',
-      {},
+      "Dump raw memory tensors and derived statistics",
+      z.object({}),
       async () => {
         await this.ensureInitialized();
-        const memoryStats = this.model.getMemoryState();
+        const stats = this.getMemoryStats();
+        const shapes = {
+          shortTerm: unwrapTensor(this.memoryState.shortTerm).shape,
+          longTerm: unwrapTensor(this.memoryState.longTerm).shape,
+          meta: unwrapTensor(this.memoryState.meta).shape
+        };
+
+        const summary = {
+          stats,
+          shapes
+        };
+
         return {
           content: [{
             type: "text",
-            text: JSON.stringify(memoryStats, null, 2)
+            text: JSON.stringify(summary, null, 2)
           }]
         };
       }
     );
 
     // Forward pass tool
-    this.server.tool(
+    this.registerToolDefinition(
       'forward_pass',
       "Perform a forward pass through the model with given input",
-      {
+      z.object({
         x: z.union([z.string(), z.array(z.number())]).describe("Input data (text or number array)"),
         memoryState: z.any().optional().describe("Optional memory state")
-      },
+      }),
       async (params) => {
         await this.ensureInitialized();
 
@@ -388,13 +544,13 @@ export class TitanMemoryServer {
     );
 
     // Train step tool
-    this.server.tool(
+    this.registerToolDefinition(
       'train_step',
       "Execute a training step with current and next inputs",
-      {
+      z.object({
         x_t: z.union([z.string(), z.array(z.number())]).describe("Current input"),
         x_next: z.union([z.string(), z.array(z.number())]).describe("Next expected input")
-      },
+      }),
       async (params) => {
         await this.ensureInitialized();
 
@@ -446,10 +602,10 @@ export class TitanMemoryServer {
     );
 
     // Get memory state tool
-    this.server.tool(
+    this.registerToolDefinition(
       'get_memory_state',
       "Get current memory state statistics and information",
-      {},
+      z.object({}),
       async () => {
         await this.ensureInitialized();
 
@@ -482,10 +638,10 @@ export class TitanMemoryServer {
     );
 
     // Token flow diagnostics
-    this.server.tool(
+    this.registerToolDefinition(
       'get_token_flow_metrics',
       "Get token flow analysis and statistics",
-      {},
+      z.object({}),
       async () => {
         await this.ensureInitialized();
 
@@ -538,10 +694,10 @@ export class TitanMemoryServer {
     );
 
     // Hierarchical memory metrics tool
-    this.server.tool(
+    this.registerToolDefinition(
       'get_hierarchical_metrics',
       "Get hierarchical memory promotion/demotion statistics",
-      {},
+      z.object({}),
       async () => {
         await this.ensureInitialized();
 
@@ -593,10 +749,10 @@ export class TitanMemoryServer {
     );
 
     // Reset gradients tool
-    this.server.tool(
+    this.registerToolDefinition(
       'reset_gradients',
       "Reset accumulated gradients in the model",
-      {},
+      z.object({}),
       async () => {
         await this.ensureInitialized();
 
@@ -621,12 +777,12 @@ export class TitanMemoryServer {
     );
 
     // Health check tool
-    this.server.tool(
+    this.registerToolDefinition(
       'health_check',
       "Get system health status and diagnostics",
-      {
+      z.object({
         detailed: z.boolean().optional().describe("Include detailed diagnostics")
-      },
+      }),
       async (params) => {
         const detailed = params.detailed ?? false;
 
@@ -652,13 +808,13 @@ export class TitanMemoryServer {
     );
 
     // Prune memory tool with information-gain scoring
-    this.server.tool(
+    this.registerToolDefinition(
       'prune_memory',
       "Prune memory using information-gain scoring to remove less relevant memories",
-      {
+      z.object({
         threshold: z.number().min(0).max(1).optional().describe("Percentage of memories to keep (0.0 to 1.0)"),
         force: z.boolean().optional().default(false).describe("Force pruning even if not needed")
-      },
+      }),
       async (params) => {
         await this.ensureInitialized();
 
@@ -713,12 +869,12 @@ export class TitanMemoryServer {
     );
 
     // Save checkpoint tool
-    this.server.tool(
+    this.registerToolDefinition(
       'save_checkpoint',
       "Save current memory state to a checkpoint file",
-      {
+      z.object({
         path: z.string().describe("Path to save the checkpoint")
-      },
+      }),
       async (params) => {
         await this.ensureInitialized();
 
@@ -726,25 +882,14 @@ export class TitanMemoryServer {
           // Validate and sanitize the file path
           const validatedPath = this.validateFilePath(params.path);
 
+          const memoryState = this.serializeMemoryState();
+          memoryState.timestamp = Date.now();
+
           const checkpointData = {
-            shapes: {
-              shortTerm: unwrapTensor(this.memoryState.shortTerm).shape,
-              longTerm: unwrapTensor(this.memoryState.longTerm).shape,
-              meta: unwrapTensor(this.memoryState.meta).shape,
-              timestamps: unwrapTensor(this.memoryState.timestamps).shape,
-              accessCounts: unwrapTensor(this.memoryState.accessCounts).shape,
-              surpriseHistory: unwrapTensor(this.memoryState.surpriseHistory).shape
-            },
-            memoryState: {
-              shortTerm: Array.from(unwrapTensor(this.memoryState.shortTerm).dataSync()),
-              longTerm: Array.from(unwrapTensor(this.memoryState.longTerm).dataSync()),
-              meta: Array.from(unwrapTensor(this.memoryState.meta).dataSync()),
-              timestamps: Array.from(unwrapTensor(this.memoryState.timestamps).dataSync()),
-              accessCounts: Array.from(unwrapTensor(this.memoryState.accessCounts).dataSync()),
-              surpriseHistory: Array.from(unwrapTensor(this.memoryState.surpriseHistory).dataSync())
-            },
+            memoryState,
             inputDim: this.model.getConfig().inputDim, // Add for validation on load
             config: this.model.getConfig(),
+            version: TITAN_MEMORY_VERSION,
             timestamp: Date.now()
           };
 
@@ -770,12 +915,12 @@ export class TitanMemoryServer {
     );
 
     // Load checkpoint tool
-    this.server.tool(
+    this.registerToolDefinition(
       'load_checkpoint',
       "Load memory state from a checkpoint file",
-      {
+      z.object({
         path: z.string().describe("Path to the checkpoint file")
-      },
+      }),
       async (params) => {
         try {
           // Validate and sanitize the file path
@@ -783,15 +928,7 @@ export class TitanMemoryServer {
 
           const data = await fs.readFile(validatedPath, 'utf-8');
           const checkpointData = JSON.parse(data) as {
-            shapes?: {
-              shortTerm: [number, number] | number[];
-              longTerm: [number, number] | number[];
-              meta: [number, number] | number[];
-              timestamps: number[];
-              accessCounts: number[];
-              surpriseHistory: number[];
-            };
-            memoryState?: {
+            memoryState?: SerializedMemoryState | {
               shortTerm: number[];
               longTerm: number[];
               meta: number[];
@@ -799,6 +936,7 @@ export class TitanMemoryServer {
               accessCounts: number[];
               surpriseHistory: number[];
             };
+            shapes?: Record<string, number[]>;
             inputDim?: number;
           };
 
@@ -815,17 +953,31 @@ export class TitanMemoryServer {
             }
           }
 
-          if (checkpointData.memoryState) {
-            const memState = checkpointData.memoryState;
-            const shapes = checkpointData.shapes;
-            this.memoryState = tf.tidy(() => ({
-              shortTerm: wrapTensor(tf.tensor2d(memState.shortTerm, shapes?.shortTerm as [number, number] ?? [memState.shortTerm.length, 1])),
-              longTerm: wrapTensor(tf.tensor2d(memState.longTerm, shapes?.longTerm as [number, number] ?? [memState.longTerm.length, 1])),
-              meta: wrapTensor(tf.tensor2d(memState.meta, shapes?.meta as [number, number] ?? [memState.meta.length, 1])),
-              timestamps: wrapTensor(tf.tensor1d(memState.timestamps)),
-              accessCounts: wrapTensor(tf.tensor1d(memState.accessCounts)),
-              surpriseHistory: wrapTensor(tf.tensor1d(memState.surpriseHistory))
-            }));
+          let serializedState: SerializedMemoryState | undefined;
+          if (checkpointData.memoryState && 'shapes' in (checkpointData.memoryState as SerializedMemoryState)) {
+            serializedState = checkpointData.memoryState as SerializedMemoryState;
+          } else if (checkpointData.memoryState) {
+            const legacy = checkpointData.memoryState as {
+              shortTerm: number[];
+              longTerm: number[];
+              meta: number[];
+              timestamps: number[];
+              accessCounts: number[];
+              surpriseHistory: number[];
+            };
+            serializedState = {
+              shapes: checkpointData.shapes ?? {},
+              shortTerm: legacy.shortTerm,
+              longTerm: legacy.longTerm,
+              meta: legacy.meta,
+              timestamps: legacy.timestamps,
+              accessCounts: legacy.accessCounts,
+              surpriseHistory: legacy.surpriseHistory
+            };
+          }
+
+          if (serializedState) {
+            this.restoreSerializedMemoryState(serializedState);
           }
 
           return {
@@ -847,10 +999,10 @@ export class TitanMemoryServer {
     );
 
     // Initialize learner service tool
-    this.server.tool(
+    this.registerToolDefinition(
       'init_learner',
       "Initialize the online learning service with specified configuration",
-      {
+      z.object({
         bufferSize: z.number().int().positive().default(10000).describe("Replay buffer size"),
         batchSize: z.number().int().positive().default(32).describe("Training batch size"),
         updateInterval: z.number().int().positive().default(1000).describe("Update interval in milliseconds"),
@@ -861,7 +1013,7 @@ export class TitanMemoryServer {
         accumulationSteps: z.number().int().positive().default(4).describe("Gradient accumulation steps"),
         learningRate: z.number().positive().default(0.0001).describe("Learning rate"),
         nanGuardThreshold: z.number().positive().default(1e-6).describe("NaN guard threshold")
-      },
+      }),
       async (params) => {
         await this.ensureInitialized();
 
@@ -910,10 +1062,10 @@ export class TitanMemoryServer {
     );
 
     // Pause learner tool
-    this.server.tool(
+    this.registerToolDefinition(
       'pause_learner',
       "Pause the online learning loop",
-      {},
+      z.object({}),
       async () => {
         try {
           if (!this.learnerService) {
@@ -946,10 +1098,10 @@ export class TitanMemoryServer {
     );
 
     // Resume learner tool
-    this.server.tool(
+    this.registerToolDefinition(
       'resume_learner',
       "Resume the online learning loop",
-      {},
+      z.object({}),
       async () => {
         try {
           if (!this.learnerService) {
@@ -982,10 +1134,10 @@ export class TitanMemoryServer {
     );
 
     // Get learner stats tool
-    this.server.tool(
+    this.registerToolDefinition(
       'get_learner_stats',
       "Get statistics about the online learning service",
-      {},
+      z.object({}),
       async () => {
         try {
           if (!this.learnerService) {
@@ -1023,15 +1175,15 @@ export class TitanMemoryServer {
     );
 
     // Add training sample tool
-    this.server.tool(
+    this.registerToolDefinition(
       'add_training_sample',
       "Add a training sample to the replay buffer",
-      {
+      z.object({
         input: z.union([z.string(), z.array(z.number())]).describe("Input data (text or number array)"),
         target: z.union([z.string(), z.array(z.number())]).describe("Target data (text or number array)"),
         positive: z.union([z.string(), z.array(z.number())]).optional().describe("Positive sample for contrastive learning"),
         negative: z.union([z.string(), z.array(z.number())]).optional().describe("Negative sample for contrastive learning")
-      },
+      }),
       async (params) => {
         const createdTensors: tf.Tensor[] = [];
 
@@ -1165,7 +1317,10 @@ export class TitanMemoryServer {
         await this.model.initialize({
           inputDim: 768,
           memorySlots: 5000,
-          transformerLayers: 6
+          transformerLayers: 6,
+          enableHierarchicalMemory: true,
+          useHierarchicalMemory: true,
+          enableEpisodicSemanticDistinction: true
         });
 
         // Ensure directory exists and save
@@ -1209,7 +1364,10 @@ export class TitanMemoryServer {
       await this.model.initialize({
         inputDim: 768,
         memorySlots: 5000,
-        transformerLayers: 6
+        transformerLayers: 6,
+        enableHierarchicalMemory: true,
+        useHierarchicalMemory: true,
+        enableEpisodicSemanticDistinction: true
       });
       this.memoryState = this.initializeEmptyState();
     }
@@ -1218,27 +1376,12 @@ export class TitanMemoryServer {
   private async saveMemoryState(): Promise<void> {
     try {
       await fs.mkdir(this.memoryPath, { recursive: true });
-      const state = {
-        shapes: {
-          shortTerm: unwrapTensor(this.memoryState.shortTerm).shape,
-          longTerm: unwrapTensor(this.memoryState.longTerm).shape,
-          meta: unwrapTensor(this.memoryState.meta).shape,
-          timestamps: unwrapTensor(this.memoryState.timestamps).shape,
-          accessCounts: unwrapTensor(this.memoryState.accessCounts).shape,
-          surpriseHistory: unwrapTensor(this.memoryState.surpriseHistory).shape
-        },
-        shortTerm: Array.from(unwrapTensor(this.memoryState.shortTerm).dataSync()),
-        longTerm: Array.from(unwrapTensor(this.memoryState.longTerm).dataSync()),
-        meta: Array.from(unwrapTensor(this.memoryState.meta).dataSync()),
-        timestamps: Array.from(unwrapTensor(this.memoryState.timestamps).dataSync()),
-        accessCounts: Array.from(unwrapTensor(this.memoryState.accessCounts).dataSync()),
-        surpriseHistory: Array.from(unwrapTensor(this.memoryState.surpriseHistory).dataSync()),
-        timestamp: Date.now()
-      };
+      const serialized = this.serializeMemoryState();
+      serialized.timestamp = Date.now();
 
       await fs.writeFile(
         path.join(this.memoryPath, 'memory_state.json'),
-        JSON.stringify(state, null, 2)
+        JSON.stringify(serialized, null, 2)
       );
     } catch (error) {
       // Silent failure
@@ -1248,26 +1391,8 @@ export class TitanMemoryServer {
   private async loadMemoryState(): Promise<void> {
     try {
       const data = await fs.readFile(path.join(this.memoryPath, 'memory_state.json'), 'utf-8');
-      const state = JSON.parse(data) as {
-        shapes?: Record<string, number[]>;
-        shortTerm: number[];
-        longTerm: number[];
-        meta: number[];
-        timestamps: number[];
-        accessCounts: number[];
-        surpriseHistory: number[];
-      };
-
-      const S = state.shapes;
-
-      this.memoryState = tf.tidy(() => ({
-        shortTerm: wrapTensor(tf.tensor2d(state.shortTerm, (S?.shortTerm as [number, number]) ?? [state.shortTerm.length, 1])),
-        longTerm: wrapTensor(tf.tensor2d(state.longTerm, (S?.longTerm as [number, number]) ?? [state.longTerm.length, 1])),
-        meta: wrapTensor(tf.tensor2d(state.meta, (S?.meta as [number, number]) ?? [state.meta.length, 1])),
-        timestamps: wrapTensor(tf.tensor1d(state.timestamps)),
-        accessCounts: wrapTensor(tf.tensor1d(state.accessCounts)),
-        surpriseHistory: wrapTensor(tf.tensor1d(state.surpriseHistory))
-      }));
+      const state = JSON.parse(data) as SerializedMemoryState;
+      this.restoreSerializedMemoryState(state);
     } catch (error) {
       // Silent failure - continue with default state
     }
@@ -1317,22 +1442,46 @@ export class TitanMemoryServer {
 
   private getMemoryStats(): MemoryStats {
     return tf.tidy(() => {
-      const shortTermData = unwrapTensor(this.memoryState.shortTerm).dataSync();
-      const longTermData = unwrapTensor(this.memoryState.longTerm).dataSync();
-      const surpriseData = unwrapTensor(this.memoryState.surpriseHistory).dataSync();
+      const shortTermTensor = unwrapTensor(this.memoryState.shortTerm) as tf.Tensor;
+      const longTermTensor = unwrapTensor(this.memoryState.longTerm) as tf.Tensor;
+      const surpriseTensor = unwrapTensor(this.memoryState.surpriseHistory) as tf.Tensor;
 
-      const shortTermMean = shortTermData.length > 0 ? Array.from(shortTermData).reduce((a, b) => a + b, 0) / shortTermData.length : 0;
-      const longTermMean = longTermData.length > 0 ? Array.from(longTermData).reduce((a, b) => a + b, 0) / longTermData.length : 0;
-      const surpriseScore = surpriseData.length > 0 ? Array.from(surpriseData).reduce((a, b) => a + b, 0) / surpriseData.length : 0;
+      let shortTermMean = 0;
+      let shortTermStd = 0;
+      if (shortTermTensor.size > 0) {
+        const { mean, variance } = tf.moments(shortTermTensor);
+        shortTermMean = mean.dataSync()[0];
+        shortTermStd = tf.sqrt(variance).dataSync()[0];
+      }
+
+      let longTermMean = 0;
+      let longTermStd = 0;
+      if (longTermTensor.size > 0) {
+        const { mean, variance } = tf.moments(longTermTensor);
+        longTermMean = mean.dataSync()[0];
+        longTermStd = tf.sqrt(variance).dataSync()[0];
+      }
+
+      const surpriseScore = surpriseTensor.size > 0
+        ? tf.mean(surpriseTensor).dataSync()[0]
+        : 0;
+
+      const shortTermRows = shortTermTensor.shape[0] ?? 0;
+      const longTermRows = longTermTensor.shape[0] ?? 0;
+      const totalRows = shortTermRows + longTermRows;
+      const memorySlots = this.model?.getConfig()?.memorySlots ?? Math.max(totalRows, 1);
+      const capacity = memorySlots > 0 ? Math.min(totalRows / memorySlots, 1) : 0;
+
+      const patternDiversity = (shortTermStd + longTermStd) / 2;
 
       return {
         shortTermMean,
-        shortTermStd: 0, // Simplified for now
+        shortTermStd,
         longTermMean,
-        longTermStd: 0, // Simplified for now
-        capacity: shortTermData.length / (this.model?.getConfig()?.memorySlots || 5000),
+        longTermStd,
+        capacity,
         surpriseScore,
-        patternDiversity: 0.5 // Simplified for now
+        patternDiversity
       };
     });
   }
@@ -1344,7 +1493,7 @@ export class TitanMemoryServer {
       status: 'healthy',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
-      version: '3.0.0',
+      version: TITAN_MEMORY_VERSION,
       checkType
     };
 
