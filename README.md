@@ -53,14 +53,20 @@ Add a custom MCP server, choose “Run a binary on this machine,” and point it
 Use the prompt below (or the version tracked in `docs/llm-system-prompt.md`) when wiring Titan into Cursor, Claude, or other MCP-compatible agents.
 
 ```markdown
-You are connected to the @henryhawke/mcp-titan MCP server. Use the tools exactly as documented in docs/api/README.md. For a comprehensive overview of the system architecture, see docs/architecture-overview.md.
+You are operating the @henryhawke/mcp-titan MCP memory server. Follow this checklist on every session:
 
-- Always call `init_model` before other memory operations unless the model was auto-loaded.
-- Use `help` to retrieve tool schemas.
-- Persist state with `save_checkpoint` / `load_checkpoint` as needed.
-- Reach for `prune_memory` when capacity exceeds 70% utilization.
-- Control the online learner with `init_learner`, `pause_learner`, `resume_learner`, and `get_learner_stats`.
-- Treat tool responses as authoritative; handle any returned error text gracefully.
+1. **Discover** — Call `help` to confirm the active tool registry and read parameter hints.
+2. **Initialize** — If the model was not auto-loaded, invoke `init_model` with any config overrides. For momentum tuning, adjust:
+   - `momentumLearningRate` (base θ),
+   - `momentumScoreGain` / `momentumScoreToDecay` (attention-weighted scaling),
+   - `momentumSurpriseGain` (surprise-driven boost), and
+   - `momentumScoreFloor` (stability floor).
+3. **Prime Memory** — Use `bootstrap_memory` or `train_step` pairs before running `forward_pass`. Inspect `memory_stats` / `get_memory_state` to verify momentum and forgetting gates are active.
+4. **Maintain** — When utilization exceeds ~70%, run `prune_memory`; persist progress with `save_checkpoint` and restore via `load_checkpoint` after restarts.
+5. **Learn Online** — Manage the learner loop through `init_learner`, `pause_learner`, `resume_learner`, `get_learner_stats`, and feed data with `add_training_sample`.
+6. **Observe** — Pull telemetry using `get_token_flow_metrics`, `health_check`, and (when hierarchical memory is enabled) `get_hierarchical_metrics`.
+
+Always treat tool responses as authoritative and surface any error text back to the user with context.
 ```
 
 ## Feature Highlights
@@ -100,6 +106,7 @@ Use `help` at runtime to confirm the latest list (the string output is being upd
 ## Further Reading
 - [docs/api/README.md](docs/api/README.md) — complete tool and parameter reference.
 - [docs/architecture-overview.md](docs/architecture-overview.md) — component relationships and data flow.
+- [docs/setup-and-tools-guide.md](docs/setup-and-tools-guide.md) — exhaustive setup checklist and tool walkthrough.
 - [SYSTEM_AUDIT.md](SYSTEM_AUDIT.md) — consolidated audit and status tracker.
 - [IMPLEMENTATION_PACKAGE.md](IMPLEMENTATION_PACKAGE.md) — navigation guide for research and production tasks.
 - [IMPLEMENTATION_COMPLETE.md](IMPLEMENTATION_COMPLETE.md) — current delivery scope and outstanding tasks.

@@ -194,6 +194,17 @@ const ModelConfigSchema = z.object({
   enableSparseAttention: z.boolean().default(false),
   sparsityRate: z.number().min(0).max(0.99).default(0.8),
   enableTelemetry: z.boolean().default(true),
+  enableMomentum: z.boolean().default(true),
+  momentumDecayRate: z.number().min(0).max(1).default(0.9),
+  momentumLearningRate: z.number().positive().default(0.001),
+  momentumScoreGain: z.number().min(0).max(10).default(0.5),
+  momentumScoreToDecay: z.number().min(0).max(1).default(0.2),
+  momentumSurpriseGain: z.number().min(0).max(10).default(0.25),
+  momentumScoreFloor: z.number().min(0).max(1).default(1e-3),
+  enableForgettingGate: z.boolean().default(false),
+  enableTokenFlow: z.boolean().default(true),
+  tokenFlowWindow: z.number().int().positive().default(10),
+  enableHierarchicalMemory: z.boolean().default(false),
   actConfig: z.object({
     maxPonderSteps: z.number().int().positive().default(10),
     ponderCost: z.number().min(0).max(1).default(0.01)
@@ -1657,7 +1668,7 @@ export class TitanMemoryModel implements IMemoryModel {
   private computeMomentumUpdate(
     state: IMemoryState,
     currentInput: tf.Tensor,
-    nextInput: tf.Tensor,
+    _nextInput: tf.Tensor,
     memoryUpdate: IMemoryUpdateResult
   ): tf.Tensor2D {
     return tf.tidy(() => {
@@ -1666,36 +1677,109 @@ export class TitanMemoryModel implements IMemoryModel {
         ? (unwrapTensor(state.momentumState) as tf.Tensor2D)
         : tf.zerosLike(previousShortTerm);
 
-      const etaValue = state.momentumDecay ?? this.config.momentumDecayRate ?? 0.9;
-      const thetaValue = (this.config as any).momentumLearningRate ?? this.config.learningRate ?? 0.001;
-
-      const scoresTensor = unwrapTensor(memoryUpdate.attention.scores) as tf.Tensor2D;
-      const keysTensor = unwrapTensor(memoryUpdate.attention.keys) as tf.Tensor2D;
-      const valuesTensor = unwrapTensor(memoryUpdate.attention.values) as tf.Tensor2D;
-
-      if (scoresTensor.size === 0 || keysTensor.size === 0 || valuesTensor.size === 0) {
+      if (previousShortTerm.shape[0] === 0) {
         return tf.keep(previousMomentum);
       }
 
-      const aggregatedKey = tf.matMul(scoresTensor, keysTensor); // [1, memoryDim]
-      const keyMatrix = tf.tile(aggregatedKey, [previousShortTerm.shape[0], 1]);
+      const scoresTensor = unwrapTensor(memoryUpdate.attention.scores) as tf.Tensor2D;
+      if (scoresTensor.size === 0) {
+        return tf.keep(previousMomentum);
+      }
 
-      const valueMatrix = tf.tile(valuesTensor, [previousShortTerm.shape[0], 1]);
+      const baseEta = state.momentumDecay ?? this.config.momentumDecayRate ?? 0.9;
+      const baseTheta = this.config.momentumLearningRate ?? this.config.learningRate ?? 0.001;
+      const scoreFloor = this.config.momentumScoreFloor ?? 1e-3;
+      const decayGain = this.config.momentumScoreToDecay ?? 0.0;
+      const thetaGain = this.config.momentumScoreGain ?? 0.0;
+      const surpriseGain = this.config.momentumSurpriseGain ?? 0.0;
 
-      const scoresColumn = tf.transpose(scoresTensor); // [memorySlots, 1]
-      const scoresMatrix = tf.tile(scoresColumn, [1, previousShortTerm.shape[1]]);
+      let slotWeights: tf.Tensor;
+      if (scoresTensor.shape[0] > 1) {
+        slotWeights = tf.mean(scoresTensor, 0);
+      } else {
+        slotWeights = scoresTensor.reshape([scoresTensor.shape[1]]);
+      }
 
-      const weightedDifference = tf.mul(
-        scoresMatrix,
-        tf.sub(tf.mul(previousShortTerm, keyMatrix), valueMatrix)
+      let flattenedScores = slotWeights.reshape([slotWeights.size]);
+      if (flattenedScores.size === 0) {
+        flattenedScores = tf.fill([previousShortTerm.shape[0]], scoreFloor);
+      }
+      const clampedScores = tf.maximum(flattenedScores, tf.scalar(scoreFloor));
+      let scoreColumn = clampedScores.reshape([clampedScores.shape[0], 1]);
+
+      if (scoreColumn.shape[0] !== previousShortTerm.shape[0]) {
+        const slots = previousShortTerm.shape[0];
+        if (scoreColumn.shape[0] > slots) {
+          scoreColumn = scoreColumn.slice([0, 0], [slots, 1]);
+        } else {
+          const padAmount = slots - scoreColumn.shape[0];
+          scoreColumn = tf.pad(scoreColumn, [[0, padAmount], [0, 0]]);
+        }
+      }
+
+      const inputMatrix = currentInput.rank === 1
+        ? currentInput.reshape([1, currentInput.shape[0]])
+        : (currentInput as tf.Tensor2D);
+      const encodedInput = this.encoder
+        ? (this.encoder.predict(inputMatrix) as tf.Tensor2D)
+        : inputMatrix;
+
+      const epsilon = tf.scalar(1e-6);
+      const keyNorm = tf.maximum(tf.norm(encodedInput, 'euclidean', 1, true), epsilon);
+      let normalizedKey = tf.div(encodedInput, keyNorm);
+
+      if (normalizedKey.shape[1] !== previousShortTerm.shape[1]) {
+        const targetDim = previousShortTerm.shape[1];
+        if (normalizedKey.shape[1] > targetDim) {
+          normalizedKey = normalizedKey.slice([0, 0], [normalizedKey.shape[0], targetDim]);
+        } else {
+          const padAmount = targetDim - normalizedKey.shape[1];
+          normalizedKey = tf.pad(normalizedKey, [[0, 0], [0, padAmount]]);
+        }
+      }
+
+      const projected = tf.matMul(previousShortTerm, normalizedKey.transpose());
+      const reconstructed = tf.mul(projected, normalizedKey);
+
+      const valuesTensor = unwrapTensor(memoryUpdate.attention.values) as tf.Tensor2D;
+      let aggregatedValues: tf.Tensor2D;
+      if (valuesTensor.shape[0] > 1) {
+        aggregatedValues = tf.mean(valuesTensor, 0).reshape([1, valuesTensor.shape[1]]) as tf.Tensor2D;
+      } else {
+        aggregatedValues = valuesTensor;
+      }
+
+      if (aggregatedValues.shape[1] !== previousShortTerm.shape[1]) {
+        const targetDim = previousShortTerm.shape[1];
+        if (aggregatedValues.shape[1] > targetDim) {
+          aggregatedValues = aggregatedValues.slice([0, 0], [1, targetDim]) as tf.Tensor2D;
+        } else {
+          const padAmount = targetDim - aggregatedValues.shape[1];
+          aggregatedValues = tf.pad(aggregatedValues, [[0, 0], [0, padAmount]]) as tf.Tensor2D;
+        }
+      }
+
+      const valueProjection = tf.mul(scoreColumn, aggregatedValues);
+      const gradientCore = tf.sub(reconstructed, valueProjection);
+
+      const decayColumn = tf.clipByValue(
+        tf.add(tf.scalar(baseEta), tf.mul(scoreColumn, tf.scalar(decayGain))),
+        0,
+        0.999
       );
+      const decayedMomentum = tf.mul(previousMomentum, decayColumn);
 
-      const momentumDecayTerm = tf.mul(previousMomentum, etaValue);
-      const gradientTerm = tf.mul(weightedDifference, thetaValue);
+      const thetaColumn = tf.add(tf.scalar(baseTheta), tf.mul(scoreColumn, tf.scalar(thetaGain)));
+      const totalSurpriseTensor = unwrapTensor(memoryUpdate.surprise.totalSurprise) as tf.Tensor;
+      const surpriseScalar = totalSurpriseTensor.rank === 0
+        ? totalSurpriseTensor
+        : tf.mean(totalSurpriseTensor);
+      const surpriseScale = tf.add(tf.scalar(1), tf.mul(surpriseScalar, tf.scalar(surpriseGain)));
 
-      const momentumUpdate = tf.sub(momentumDecayTerm, gradientTerm);
+      const gradientScaled = tf.mul(gradientCore, tf.mul(thetaColumn, surpriseScale));
+      const newMomentum = tf.sub(decayedMomentum, gradientScaled) as tf.Tensor2D;
 
-      return tf.keep(momentumUpdate) as tf.Tensor2D;
+      return tf.keep(newMomentum);
     });
   }
 
