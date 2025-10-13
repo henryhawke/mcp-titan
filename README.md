@@ -78,11 +78,11 @@ Always treat tool responses as authoritative and surface any error text back to 
 - **Training Pipeline:** `scripts/train-model.ts` pipes into `src/training/trainer.ts`, providing synthetic data generation and tokenizer training when no dataset is supplied.
 
 ## Tooling Overview
-The server currently registers **17** MCP tools:
+The server currently registers **19** MCP tools:
 
-`help`, `bootstrap_memory`, `init_model`, `memory_stats`, `forward_pass`, `train_step`, `get_memory_state`, `get_token_flow_metrics`, `reset_gradients`, `prune_memory`, `save_checkpoint`, `load_checkpoint`, `init_learner`, `pause_learner`, `resume_learner`, `get_learner_stats`, `add_training_sample`.
+`help`, `bootstrap_memory`, `init_model`, `memory_stats`, `forward_pass`, `train_step`, `get_memory_state`, `get_token_flow_metrics`, `get_hierarchical_metrics`, `reset_gradients`, `health_check`, `prune_memory`, `save_checkpoint`, `load_checkpoint`, `init_learner`, `pause_learner`, `resume_learner`, `get_learner_stats`, `add_training_sample`.
 
-Use `help` at runtime to confirm the latest list (the string output is being updated to match this registry). See [docs/api/README.md](docs/api/README.md) for parameter schemas and defaults. The `manifold_step` operation remains on the roadmap—track progress in [ROADMAP_ANALYSIS.md](ROADMAP_ANALYSIS.md).
+The `help` tool now derives its listing dynamically from the active registry, so invoke it at runtime to confirm newly added operations. See [docs/api/README.md](docs/api/README.md) for parameter schemas and defaults. The `manifold_step` operation remains on the roadmap—track progress in [ROADMAP_ANALYSIS.md](ROADMAP_ANALYSIS.md).
 
 ## Persistence & Files
 - Memory state is serialized to `~/.titan_memory/memory_state.json`.
