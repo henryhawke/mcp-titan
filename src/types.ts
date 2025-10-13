@@ -80,6 +80,11 @@ export const TitanMemoryConfigSchema = z.object({
   // Research Paper Extensions
   enableMomentum: z.boolean().default(true).describe("Enable momentum-based memory updates"),
   momentumDecayRate: z.number().min(0).max(1).default(0.9).describe("η_t: Momentum decay parameter"),
+  momentumLearningRate: z.number().positive().default(0.001).describe("θ_t: Momentum learning rate"),
+  momentumScoreGain: z.number().min(0).max(10).default(0.5).describe("Attention-weighted boost applied to θ_t"),
+  momentumScoreToDecay: z.number().min(0).max(1).default(0.2).describe("Attention-weighted boost applied to η_t"),
+  momentumSurpriseGain: z.number().min(0).max(10).default(0.25).describe("Scales θ_t based on surprise magnitude"),
+  momentumScoreFloor: z.number().min(0).max(1).default(1e-3).describe("Lower bound for attention weights in momentum updates"),
   enableForgettingGate: z.boolean().default(false).describe("Enable learnable forgetting gate"),
   forgettingGateInit: z.number().min(0).max(1).default(0.1).describe("α_t initial value"),
   enableTokenFlow: z.boolean().default(true).describe("Enable token flow tracking"),

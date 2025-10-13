@@ -186,10 +186,18 @@ export class LearnerService {
     positive?: string | tf.Tensor,
     negative?: string | tf.Tensor
   ): Promise<void> {
-    const inputInfo = await this.normalizeSample(input);
-    const targetInfo = await this.normalizeSample(target);
-    const positiveInfo = positive ? await this.normalizeSample(positive) : undefined;
-    const negativeInfo = negative ? await this.normalizeSample(negative) : undefined;
+    const inputInfo = typeof input === 'string'
+      ? await this.normalizeSample(input)
+      : this.normalizeTensorSample(input);
+    const targetInfo = typeof target === 'string'
+      ? await this.normalizeSample(target)
+      : this.normalizeTensorSample(target);
+    const positiveInfo = typeof positive === 'string'
+      ? await this.normalizeSample(positive)
+      : (positive ? this.normalizeTensorSample(positive) : undefined);
+    const negativeInfo = typeof negative === 'string'
+      ? await this.normalizeSample(negative)
+      : (negative ? this.normalizeTensorSample(negative) : undefined);
 
     const sample: TrainingSample = {
       input: inputInfo.tensor,
@@ -203,33 +211,43 @@ export class LearnerService {
     this.replayBuffer.add(sample);
   }
 
-  private async normalizeSample(value: string | tf.Tensor): Promise<{ tensor: tf.Tensor; sequenceLength: number }> {
-    if (typeof value === 'string') {
-      const encodeResult = await (this.tokenizer.encode as any)(value);
+  private async normalizeSample(value: string): Promise<{ tensor: tf.Tensor; sequenceLength: number }> {
+    const encodeResult = await (this.tokenizer.encode as any)(value);
 
-      if (encodeResult == null) {
-        throw new Error('Tokenizer returned no result for provided text input.');
-      }
-
-      if (encodeResult instanceof tf.Tensor) {
-        const tensor = this.ensure1DTensor(encodeResult);
-        const sequenceLength = encodeResult.shape[0] ?? encodeResult.size;
-        encodeResult.dispose();
-        return { tensor, sequenceLength };
-      }
-
-      if ('embeddings' in encodeResult) {
-        const embeddings = encodeResult.embeddings as tf.Tensor;
-        const sequenceLength = embeddings.shape[0] ?? embeddings.size;
-        const averaged = tf.tidy(() => embeddings.mean(0));
-        embeddings.dispose();
-        return { tensor: averaged, sequenceLength };
-      }
-
-      throw new Error('Unsupported tokenizer encode result. Expected tensor embeddings.');
+    if (encodeResult == null) {
+      throw new Error('Tokenizer returned no result for provided text input.');
     }
 
-    const tensor = value.clone();
+    if (encodeResult instanceof tf.Tensor) {
+      const tensor = this.ensure1DTensor(encodeResult);
+      const sequenceLength = encodeResult.shape[0] ?? encodeResult.size;
+      encodeResult.dispose();
+      return { tensor, sequenceLength };
+    }
+
+    if ('embeddings' in encodeResult) {
+      const embeddings = encodeResult.embeddings as tf.Tensor;
+      const sequenceLength = embeddings.shape[0] ?? embeddings.size;
+      const averaged = tf.tidy(() => embeddings.mean(0));
+      embeddings.dispose();
+      return { tensor: averaged, sequenceLength };
+    }
+
+    throw new Error('Unsupported tokenizer encode result. Expected tensor embeddings.');
+  }
+
+  private normalizeTensorSample(value: tf.Tensor): { tensor: tf.Tensor; sequenceLength: number } {
+    const tensorInput = value as tf.Tensor;
+
+    if (typeof tensorInput.isDisposed === 'function' && tensorInput.isDisposed()) {
+      throw new Error('Cannot normalize a disposed tensor input.');
+    }
+
+    // Keep a reference to guard against callers disposing their tensor while we clone it.
+    const kept = tf.keep(tensorInput);
+    const tensor = kept.clone();
+    kept.dispose();
+
     const sequenceLength = tensor.shape[0] ?? tensor.size;
     return { tensor, sequenceLength };
   }

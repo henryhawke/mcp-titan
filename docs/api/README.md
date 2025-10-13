@@ -97,6 +97,11 @@ The `init_model` schema ultimately uses the `TitanMemoryConfigSchema` from `src/
 | `gradientClip` | `1.0`
 | `enableMomentum` | `true`
 | `momentumDecayRate` | `0.9`
+| `momentumLearningRate` | `0.001`
+| `momentumScoreGain` | `0.5`
+| `momentumScoreToDecay` | `0.2`
+| `momentumSurpriseGain` | `0.25`
+| `momentumScoreFloor` | `0.001`
 | `enableForgettingGate` | `false`
 | `forgettingGateInit` | `0.1`
 | `enableTokenFlow` | `true`
