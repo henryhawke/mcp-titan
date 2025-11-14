@@ -35,11 +35,12 @@ The server only speaks MCP over stdio. Point your client at the executable inste
   "mcp": {
     "servers": {
       "mcp-titan": {
-        "command": "mcp-titan",
-        "env": {
-          "NODE_ENV": "production"
-        },
-        "workingDirectory": "~/.titan_memory"
+        "command": "npx",
+        "args": [
+          "-y",
+          "@henryhawke/mcp-titan"
+        ],
+        "workingDirectory": "~/WHEREVER YOU WANT YOUR MEMORY"
       }
     }
   }
@@ -47,7 +48,7 @@ The server only speaks MCP over stdio. Point your client at the executable inste
 ```
 
 ### Claude Desktop
-Add a custom MCP server, choose “Run a binary on this machine,” and point it at the same `titan-memory` command. No port configuration is required.
+Add a custom MCP server, choose “Run a binary on this machine,” and point it at the same `mcp-titan` command. No port configuration is required.
 
 ## LLM System Prompt
 Use the prompt below (or the version tracked in `docs/llm-system-prompt.md`) when wiring Titan into Cursor, Claude, or other MCP-compatible agents.
