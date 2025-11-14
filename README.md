@@ -23,7 +23,7 @@ The runtime creates `~/.titan_memory/` (override with `--memoryPath` when instan
 The published package exposes a `titan-memory` binary (see `bin` in `package.json`). Use it directly or via `npx`:
 
 ```bash
-npx titan-memory
+npx @henryhawke/mcp-titan
 ```
 
 ## MCP Client Integration
@@ -34,8 +34,8 @@ The server only speaks MCP over stdio. Point your client at the executable inste
 {
   "mcp": {
     "servers": {
-      "titan-memory": {
-        "command": "titan-memory",
+      "mcp-titan": {
+        "command": "mcp-titan",
         "env": {
           "NODE_ENV": "production"
         },
