@@ -1,6 +1,10 @@
-# HOPE Memory MCP Server
+# TITAN HOPE Memory MCP Server
 
-Stdio-first Model Context Protocol (MCP) server that pairs a TensorFlow.js-backed memory model with optional online learning and workflow orchestration services. This README reflects the project state as of October 10, 2025 and aligns with the current `src/index.ts` implementation.
+So very recently, Google's researchers released a lovely new paper I'm still digesting. I'm so excited to have HOPE architecture integrated into this MCP. Its the natural progression of the initial TITAN architecture this experimental MCP has been reliant on. 
+
+HOPE is also a funny acronym for this because I HOPE it works. I never got the initial TITAN architecture finished and the new research has stoked my interest again.
+
+Stdio-first Model Context Protocol (MCP) server that pairs a TensorFlow.js-backed memory model with optional online learning and workflow orchestration services. This README reflects the project state as of November 15th, 2025 and aligns with the current `src/index.ts` implementation.
 
 ## Requirements
 - Node.js **22.0.0+** (enforced by `package.json` `engines` field)
