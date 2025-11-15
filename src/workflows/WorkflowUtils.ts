@@ -1,10 +1,10 @@
-import type { TitanMemorySystem } from '../types.js';
+import type { HopeMemorySystem } from '../types.js';
 
 /**
  * Safely store workflow memory data
  */
 export async function safeStoreWorkflowMemory(
-    memory: TitanMemorySystem,
+    memory: HopeMemorySystem,
     type: string,
     data: any
 ): Promise<void> {
@@ -24,7 +24,7 @@ export async function safeStoreWorkflowMemory(
  * Safely get relevant context from memory
  */
 export async function safeGetRelevantContext(
-    memory: TitanMemorySystem,
+    memory: HopeMemorySystem,
     query: string
 ): Promise<any> {
     try {
@@ -45,7 +45,7 @@ export async function safeGetRelevantContext(
  * Safely find similar content
  */
 export async function safeFindSimilarContent(
-    memory: TitanMemorySystem,
+    memory: HopeMemorySystem,
     content: string
 ): Promise<Array<{ score: number; content: string }>> {
     try {
@@ -69,7 +69,7 @@ export async function safeFindSimilarContent(
  * Safely get workflow history
  */
 export async function safeGetWorkflowHistory(
-    memory: TitanMemorySystem,
+    memory: HopeMemorySystem,
     type: string,
     limit: number
 ): Promise<any[]> {
@@ -95,7 +95,7 @@ export async function safeGetWorkflowHistory(
 /**
  * Safely shutdown memory system
  */
-export async function safeShutdown(memory: TitanMemorySystem): Promise<void> {
+export async function safeShutdown(memory: HopeMemorySystem): Promise<void> {
     try {
         if (memory.shutdown) {
             await memory.shutdown();
@@ -111,7 +111,7 @@ export async function safeShutdown(memory: TitanMemorySystem): Promise<void> {
 /**
  * Safely get health status
  */
-export async function safeGetHealthStatus(memory: TitanMemorySystem): Promise<any> {
+export async function safeGetHealthStatus(memory: HopeMemorySystem): Promise<any> {
     try {
         if (memory.getHealthStatus) {
             return await memory.getHealthStatus();

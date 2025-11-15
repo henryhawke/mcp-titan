@@ -1,7 +1,7 @@
-# Titan Memory MCP Server – System Prompt & Tool Reference
+# HOPE Memory MCP Server – System Prompt & Tool Reference
 
 Last updated: October 10, 2025  
-Server version: `Titan Memory` v1.2.0  
+Server version: `HOPE Memory` v1.2.0 (Titan aliases remain available)
 Tool registry: 17 tools (see below)
 
 ---
@@ -29,7 +29,7 @@ You are connected to the @henryhawke/mcp-titan MCP server over stdio. Follow the
 | --- | --- | --- |
 | `help` | Lists tools, categories, and optional examples. | `{ tool?: string; category?: string; showExamples?: boolean; verbose?: boolean; }` |
 | `bootstrap_memory` | Fetches documents from a URL or raw corpus, seeds TF-IDF fallbacks, and stores summaries in memory. | `{ source: string; } // URL or plain text` |
-| `init_model` | Instantiates `TitanMemoryModel` with configurable dimensions and flags. Defaults follow `TitanMemoryConfig`. | `{ inputDim?: number; hiddenDim?: number; memoryDim?: number; transformerLayers?: number; numHeads?: number; ffDimension?: number; dropoutRate?: number; maxSequenceLength?: number; memorySlots?: number; similarityThreshold?: number; surpriseDecay?: number; pruningInterval?: number; gradientClip?: number; }` |
+| `init_model` | Instantiates `HopeMemoryModel` with configurable dimensions and flags. Defaults follow `HopeMemoryConfig`. | `{ inputDim?: number; hiddenDim?: number; memoryDim?: number; shortTermSlots?: number; longTermSlots?: number; archiveSlots?: number; learningRate?: number; dropoutRate?: number; promotionThreshold?: number; surpriseRetention?: number; routerTopK?: number; }` |
 
 ### Inference & Training
 
@@ -71,7 +71,7 @@ You are connected to the @henryhawke/mcp-titan MCP server over stdio. Follow the
 
 - `manifold_step`, `encode_text`, `get_surprise_metrics`, `analyze_memory`, and `predict_next` are roadmap items. Avoid calling them until new handlers ship.
 - `bootstrap_memory` may fetch external resources; ensure the environment allows network access if required.
-- `save_checkpoint` and `load_checkpoint` enforce a path allowlist; use absolute paths under `~/.titan_memory` or the working directory.
+- `save_checkpoint` and `load_checkpoint` enforce a path allowlist; use absolute paths under `~/.hope_memory` or the working directory.
 - `init_learner` installs a random-vector tokenizer by default. Replace `server.tokenizer` with `AdvancedTokenizer` if deterministic embeddings are needed before enqueuing samples.
 - For long-running sessions, periodically call `get_memory_state` and `prune_memory` to prevent unchecked growth.
 
@@ -84,7 +84,7 @@ await callTool("init_model", { memorySlots: 8000, enableMomentum: true });
 await callTool("bootstrap_memory", { source: "https://example.org/notes.txt" });
 await callTool("forward_pass", { x: "Summarize the previous meeting notes." });
 await callTool("prune_memory", { threshold: 0.75 });
-await callTool("save_checkpoint", { path: "~/.titan_memory/checkpoints/session-001.json" });
+await callTool("save_checkpoint", { path: "~/.hope_memory/checkpoints/session-001.json" });
 ```
 
 ---

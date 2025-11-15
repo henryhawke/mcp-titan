@@ -1,10 +1,10 @@
-import { TitanMemoryServer } from '../index.js';
+import { HopeMemoryServer } from '../index.js';
 
-describe('TitanMemoryServer', () => {
-  let server: TitanMemoryServer;
+describe('HopeMemoryServer', () => {
+  let server: HopeMemoryServer;
 
   beforeEach(async () => {
-    server = new TitanMemoryServer();
+    server = new HopeMemoryServer();
   });
 
   afterEach(async () => {
@@ -19,6 +19,6 @@ describe('TitanMemoryServer', () => {
 
   test('handles basic operations', async () => {
     // Basic test that doesn't require complex setup
-    expect(server).toBeInstanceOf(TitanMemoryServer);
+    expect(server).toBeInstanceOf(HopeMemoryServer);
   });
 });

@@ -2,8 +2,8 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as tf from '@tensorflow/tfjs-node';
-import { TitanMemoryModel } from './model.js';
-import type { TitanMemoryConfig } from './types.js';
+import { HopeMemoryModel } from './model.js';
+import type { HopeMemoryConfig } from './model.js';
 import { AdvancedTokenizer } from './tokenizer/index.js';
 import { HNSW } from './ann.js';
 
@@ -13,7 +13,7 @@ export interface CheckpointMetadata {
   created: string;
   modelHash: string;
   snapshotId: string;
-  config: TitanMemoryConfig;
+  config: HopeMemoryConfig;
   files: {
     modelConfig: string;
     weights: string;
@@ -72,7 +72,7 @@ export class RobustPersistenceManager {
    * Save a complete model checkpoint with all components
    */
   async saveCheckpoint(
-    model: TitanMemoryModel,
+    model: HopeMemoryModel,
     tokenizer?: AdvancedTokenizer,
     annIndex?: HNSW,
     metadata?: Partial<CheckpointMetadata>
@@ -139,7 +139,7 @@ export class RobustPersistenceManager {
       loadComponents?: Array<'model' | 'tokenizer' | 'annIndex'>;
     } = {}
   ): Promise<{
-    model: TitanMemoryModel;
+    model: HopeMemoryModel;
     tokenizer?: AdvancedTokenizer;
     annIndex?: HNSW;
     metadata: CheckpointMetadata;
@@ -155,7 +155,7 @@ export class RobustPersistenceManager {
       }
 
       // Load model
-      const model = new TitanMemoryModel();
+      const model = new HopeMemoryModel();
       await this.loadModelComponent(path.dirname(checkpointPath), model, metadata);
 
       // Load optional components
@@ -366,7 +366,7 @@ export class RobustPersistenceManager {
    */
   private async saveAllComponents(
     snapshotDir: string,
-    model: TitanMemoryModel,
+    model: HopeMemoryModel,
     tokenizer?: AdvancedTokenizer,
     annIndex?: HNSW
   ): Promise<CheckpointMetadata['files']> {
@@ -459,7 +459,7 @@ export class RobustPersistenceManager {
   /**
    * Load model component
    */
-  private async loadModelComponent(snapshotDir: string, model: TitanMemoryModel, metadata: CheckpointMetadata): Promise<void> {
+  private async loadModelComponent(snapshotDir: string, model: HopeMemoryModel, metadata: CheckpointMetadata): Promise<void> {
     // Load configuration
     const configPath = path.join(snapshotDir, metadata.files.modelConfig);
     const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
@@ -534,7 +534,7 @@ export class RobustPersistenceManager {
   /**
    * Generate model hash based on configuration
    */
-  private generateModelHash(config: TitanMemoryConfig): string {
+  private generateModelHash(config: HopeMemoryConfig): string {
     const hashableConfig = {
       inputDim: config.inputDim,
       hiddenDim: config.hiddenDim,

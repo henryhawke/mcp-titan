@@ -2,12 +2,12 @@ import { EventEmitter } from 'events';
 import { GitHubWorkflowManager } from './GitHubWorkflowManager.js';
 import { LintingManager } from './LintingManager.js';
 import { FeedbackProcessor } from './FeedbackProcessor.js';
-import { TitanMemoryModel } from '../model.js';
-import type { WorkflowConfig, WorkflowStatus, WorkflowEvent, WorkflowMetrics, TitanMemorySystem } from '../types.js';
+import { HopeMemoryModel } from '../model.js';
+import type { WorkflowConfig, WorkflowStatus, WorkflowEvent, WorkflowMetrics, HopeMemorySystem } from '../types.js';
 
 export class WorkflowOrchestrator extends EventEmitter {
     private config: WorkflowConfig;
-    private memory: TitanMemorySystem;
+    private memory: HopeMemorySystem;
     private gitHubManager!: GitHubWorkflowManager;
     private lintingManager!: LintingManager;
     private feedbackProcessor!: FeedbackProcessor;
@@ -19,7 +19,7 @@ export class WorkflowOrchestrator extends EventEmitter {
     constructor(config: WorkflowConfig) {
         super();
         this.config = config;
-        this.memory = new TitanMemoryModel(config.memory.titanConfig);
+        this.memory = new HopeMemoryModel(config.memory.hopeConfig ?? {});
         this.status = {
             state: 'initializing',
             lastUpdate: new Date(),
@@ -44,7 +44,7 @@ export class WorkflowOrchestrator extends EventEmitter {
             this.emit('status', { type: 'initialization', message: 'Starting workflow orchestrator' });
 
             // Initialize memory system
-            await this.memory.initialize();
+            await this.memory.initialize(config.memory.hopeConfig ?? {});
             this.emit('status', { type: 'initialization', message: 'Memory system initialized' });
 
             // Initialize workflow managers

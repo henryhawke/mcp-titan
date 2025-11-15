@@ -94,6 +94,22 @@ export const TitanMemoryConfigSchema = z.object({
 
 export type TitanMemoryConfig = z.infer<typeof TitanMemoryConfigSchema>;
 
+export const HopeMemoryConfigSchema = z.object({
+  inputDim: z.number().int().positive().default(256),
+  hiddenDim: z.number().int().positive().default(192),
+  memoryDim: z.number().int().positive().default(256),
+  shortTermSlots: z.number().int().positive().default(64),
+  longTermSlots: z.number().int().positive().default(256),
+  archiveSlots: z.number().int().positive().default(512),
+  learningRate: z.number().positive().default(0.001),
+  dropoutRate: z.number().min(0).max(1).default(0.1),
+  promotionThreshold: z.number().min(0).max(1).default(0.05),
+  surpriseRetention: z.number().min(0).max(1).default(0.85),
+  routerTopK: z.number().int().positive().max(3).default(2)
+});
+
+export type HopeMemoryConfig = z.infer<typeof HopeMemoryConfigSchema>;
+
 /**
  * Interface for memory state in the Titans architecture.
  * Extended to support research paper concepts: momentum-based updates and token flow tracking
@@ -645,6 +661,7 @@ export interface WorkflowConfig {
   };
   memory: {
     titanConfig: TitanMemoryConfig;
+    hopeConfig?: HopeMemoryConfig;
     persistence?: PersistenceConfig;
   };
 }
@@ -905,6 +922,7 @@ export interface WorkflowMetrics {
 /**
  * Alias for TitanMemoryModel for workflow compatibility
  */
+export type HopeMemorySystem = IMemoryModel;
 export type TitanMemorySystem = IMemoryModel;
 
 // ====== END WORKFLOW TYPES ======
