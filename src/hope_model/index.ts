@@ -8,27 +8,14 @@ import type {
   IMemoryUpdateResult,
   IAttentionBlock,
   ISurpriseMetrics,
-  IModelGradients
+  IModelGradients,
+  HopeMemoryConfig
 } from '../types.js';
 import { ContinuumMemory, type ContinuumMemoryConfig, type HopeMemoryState, type HierarchicalStats } from './continuum_memory.js';
 import { RetentiveCore, type RetentiveCoreConfig, type RetentionState } from './retention_core.js';
 import { SelectiveStateSpace } from './mamba_filters.js';
 import { MemoryRouter, type RoutingDecision } from './memory_router.js';
 import { DeltaCompressionHook, LayerScheduler, UpdateBuffer } from './optimizer_hooks.js';
-
-export interface HopeMemoryConfig {
-  inputDim: number;
-  hiddenDim: number;
-  memoryDim: number;
-  shortTermSlots: number;
-  longTermSlots: number;
-  archiveSlots: number;
-  learningRate: number;
-  dropoutRate: number;
-  promotionThreshold: number;
-  surpriseRetention: number;
-  routerTopK: number;
-}
 
 const DEFAULT_CONFIG: HopeMemoryConfig = {
   inputDim: 256,
@@ -41,7 +28,16 @@ const DEFAULT_CONFIG: HopeMemoryConfig = {
   dropoutRate: 0.1,
   promotionThreshold: 0.05,
   surpriseRetention: 0.85,
-  routerTopK: 2
+  routerTopK: 2,
+  // Backward compatibility fields
+  maxSequenceLength: 512,
+  memorySlots: 256,
+  transformerLayers: 6,
+  enableMomentum: true,
+  enableTokenFlow: true,
+  enableForgettingGate: false,
+  enableHierarchicalMemory: true,
+  useHierarchicalMemory: true
 };
 
 interface ForwardArtifacts {
@@ -108,14 +104,13 @@ export class HopeMemoryModel implements IMemoryModel {
     this.latestMemoryState = this.continuumMemory.initialize();
   }
 
-  public async initialize(config?: Partial<HopeMemoryConfig>): Promise<HopeMemoryState> {
+  public async initialize(config?: Partial<HopeMemoryConfig>): Promise<void> {
     if (config) {
       this.config = { ...this.config, ...config };
     }
     this.optimizer = tf.train.adam(this.config.learningRate);
     this.retentionState = this.retentiveCore.initState(1);
     this.latestMemoryState = this.continuumMemory.initialize();
-    return this.latestMemoryState;
   }
 
   public createInitialState(): HopeMemoryState {
@@ -260,6 +255,11 @@ export class HopeMemoryModel implements IMemoryModel {
     // No-op for now – HOPE recomputes auxiliary state during initialization.
   }
 
+  // Alias for backward compatibility
+  public async load(directory: string): Promise<void> {
+    await this.loadModel(directory);
+  }
+
   public async loadModel(directory: string): Promise<void> {
     const filePath = path.join(directory, 'hope_model.json');
     const exists = await fs.access(filePath).then(() => true).catch(() => false);
@@ -291,6 +291,67 @@ export class HopeMemoryModel implements IMemoryModel {
       shapes
     };
     await fs.writeFile(path.join(directory, 'hope_model.json'), JSON.stringify(payload));
+  }
+
+  // Alias for IMemoryModel compatibility
+  public async saveModel(path: string): Promise<void> {
+    await this.save(path);
+  }
+
+  // IMemoryModel required methods
+  public getMemoryState(): HopeMemoryState {
+    return this.latestMemoryState;
+  }
+
+  public resetMemory(): void {
+    this.latestMemoryState = this.createInitialState();
+    this.retentionState = undefined;
+  }
+
+  public updateMetaMemory(surprise: ISurpriseMetrics, context: tf.Tensor): tf.Tensor {
+    // For HOPE, meta memory is managed within ContinuumMemory
+    // Return the context unchanged as this is handled internally
+    return context;
+  }
+
+  public pruneMemory(memoryState: IMemoryState, threshold: number): IMemoryState {
+    // Convert IMemoryState to HopeMemoryState and prune
+    const hopeState = memoryState as unknown as HopeMemoryState;
+    const pruned = this.continuumMemory.prune(hopeState, threshold);
+    return pruned as unknown as IMemoryState;
+  }
+
+  public manifoldStep(base: tf.Tensor, velocity: tf.Tensor): tf.Tensor {
+    // Simple Euler step on the manifold (base + velocity)
+    // In future, this could implement geodesic stepping
+    return tf.add(base, velocity);
+  }
+
+  public getMemorySnapshot(): Record<string, tf.Tensor> {
+    const state = this.latestMemoryState;
+    return {
+      shortTerm: state.shortTerm,
+      longTerm: state.longTerm,
+      archive: state.archive || tf.zeros([1, this.config.memoryDim]),
+      surpriseHistory: state.surpriseHistory,
+      accessCounts: state.accessCounts
+    };
+  }
+
+  public restoreMemoryState(state: IMemoryState): void {
+    this.latestMemoryState = state as unknown as HopeMemoryState;
+  }
+
+  public async recallMemory(query: string, topK: number = 5): Promise<tf.Tensor2D[]> {
+    const queryTensor = await this.encodeText(query);
+    const queryTensor2d = queryTensor.expandDims(0) as tf.Tensor2D;
+
+    // Read from memory using the router
+    const decision = this.memoryRouter.route(queryTensor2d, this.latestMemoryState);
+    const memoryRead = this.continuumMemory.read(this.latestMemoryState, queryTensor2d, decision.weights);
+
+    // Return the memory read as a single-element array (simplified recall)
+    return [memoryRead as tf.Tensor2D];
   }
 
   public dispose(): void {

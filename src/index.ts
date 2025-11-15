@@ -89,8 +89,7 @@ export class HopeMemoryServer {
   constructor(options: { memoryPath?: string } = {}) {
     this.server = new McpServer({
       name: "HOPE Memory",
-      version: HOPE_MEMORY_VERSION,
-      description: "A retentive continuum memory system that learns and adapts through MCP tool calls"
+      version: HOPE_MEMORY_VERSION
     });
     this.vectorProcessor = VectorProcessor.getInstance();
     this.memoryPath = options.memoryPath ?? path.join(process.cwd(), '.hope_memory');
@@ -854,21 +853,23 @@ export class HopeMemoryServer {
           const beforeStats = this.model.getPruningStats();
 
           // Perform pruning
-          const result = await this.model.pruneMemoryByInformationGain(params.threshold);
+          await this.model.pruneMemoryByInformationGain(params.threshold);
 
           // Get stats after pruning
           const afterStats = this.model.getPruningStats();
 
+          const originalCount = beforeStats.shortTerm + beforeStats.longTerm + beforeStats.archive;
+          const finalCount = afterStats.shortTerm + afterStats.longTerm + afterStats.archive;
+          const reduction = originalCount > 0 ? ((originalCount - finalCount) / originalCount * 100) : 0;
+
           const message = [
             `Memory pruning completed successfully:`,
-            `• Original count: ${result.originalCount} memories`,
-            `• Final count: ${result.finalCount} memories`,
-            `• Distilled count: ${result.distilledCount} memories moved to long-term storage`,
-            `• Reduction ratio: ${(result.reductionRatio * 100).toFixed(1)}%`,
-            `• Average score of kept memories: ${result.averageScore.toFixed(4)}`,
-            `• Current memory usage: ${afterStats.currentMemorySize}/${afterStats.maxCapacity} slots`,
-            `• Total pruning operations: ${afterStats.totalPrunings}`,
-            `• Time since last pruning: ${(afterStats.timeSinceLastPruning / 1000).toFixed(1)}s`
+            `• Original count: ${originalCount} memories`,
+            `• Final count: ${finalCount} memories`,
+            `• Memories pruned: ${originalCount - finalCount}`,
+            `• Reduction: ${reduction.toFixed(1)}%`,
+            `• Average surprise: ${afterStats.averageSurprise.toFixed(4)}`,
+            `• Short-term: ${afterStats.shortTerm}, Long-term: ${afterStats.longTerm}, Archive: ${afterStats.archive}`
           ].join('\n');
 
           return {

@@ -239,7 +239,7 @@ export class LearnerService {
   private normalizeTensorSample(value: tf.Tensor): { tensor: tf.Tensor; sequenceLength: number } {
     const tensorInput = value as tf.Tensor;
 
-    if (typeof tensorInput.isDisposed === 'function' && tensorInput.isDisposed()) {
+    if (tensorInput.isDisposed) {
       throw new Error('Cannot normalize a disposed tensor input.');
     }
 
