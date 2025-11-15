@@ -12,12 +12,13 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version?: string };
 
-import type { IMemoryState, SerializedAuxiliaryMemoryState } from './types.js';
+import type { IMemoryState, SerializedAuxiliaryMemoryState, ITokenizer } from './types.js';
 import { wrapTensor, unwrapTensor } from './types.js';
 import { HopeMemoryModel } from './model.js';
 export { HopeMemoryModel } from './model.js';
 export { AdvancedTokenizer, BPETokenizer, TokenEmbedding, MaskedLanguageModelHead } from './tokenizer/index.js';
 export type { TokenizerConfig, TokenizationResult, BPEConfig, EmbeddingConfig, MLMConfig } from './tokenizer/index.js';
+import { AdvancedTokenizer } from './tokenizer/index.js';
 export { LearnerService, type LearnerConfig } from './learner.js';
 import { LearnerService, type LearnerConfig } from './learner.js';
 import { VectorProcessor } from './utils.js';
@@ -77,7 +78,7 @@ export class HopeMemoryServer {
   private vectorProcessor: VectorProcessor;
   private memoryState: IMemoryState;
   private learnerService?: LearnerService;
-  private tokenizer?: any; // Will be AdvancedTokenizer when available
+  private tokenizer?: ITokenizer;
   private isInitialized = false;
   private autoSaveInterval?: NodeJS.Timeout;
   private readonly memoryPath: string;
@@ -1040,12 +1041,16 @@ export class HopeMemoryServer {
         try {
           // Initialize tokenizer if not already done
           if (!this.tokenizer) {
-            // For now, we'll use a mock tokenizer - in practice this would be AdvancedTokenizer
-            this.tokenizer = {
-              encode: (text: string) => tf.randomNormal([768]),
-              decode: (tensor: tf.Tensor) => 'decoded_text',
-              getSpecialTokens: () => ({ mask: 103, pad: 0, unk: 1 })
-            };
+            // TODO: Replace with proper AdvancedTokenizer integration
+            // Current limitation: AdvancedTokenizer.encode() is async, but ITokenizer requires sync
+            // For production use, refactor learner service to be async or pre-initialize tokenizer
+            this.logger.warn('Using fallback tokenizer. For production, integrate AdvancedTokenizer properly.');
+
+            throw new Error(
+              'Tokenizer not initialized. The learner service requires a properly initialized tokenizer. ' +
+              'This is a known limitation - AdvancedTokenizer is async but the current interface is sync. ' +
+              'Please initialize the tokenizer before calling start_learning, or refactor to async.'
+            );
           }
 
           const learnerConfig: Partial<LearnerConfig> = {

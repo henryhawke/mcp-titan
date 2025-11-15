@@ -1,10 +1,12 @@
-# TITAN HOPE Memory MCP Server
+# MCP-Titan: HOPE Memory Server
 
-So very recently, Google's researchers released a lovely new paper I'm still digesting. I'm so excited to have HOPE architecture integrated into this MCP. Its the natural progression of the initial TITAN architecture this experimental MCP has been reliant on. 
+**Hierarchical Online Persistent Encoding (HOPE) Memory System**
 
-HOPE is also a funny acronym for this because I HOPE it works. I never got the initial TITAN architecture finished and the new research has stoked my interest again.
+A Model Context Protocol (MCP) server implementing the HOPE architecture - an evolution beyond the original TITAN (Training at Test Time with Attention for Neural Memory) architecture. HOPE provides persistent, hierarchical neural memory with efficient long-context handling.
 
-Stdio-first Model Context Protocol (MCP) server that pairs a TensorFlow.js-backed memory model with optional online learning and workflow orchestration services. This README reflects the project state as of November 15th, 2025 and aligns with the current `src/index.ts` implementation.
+> **Note on Naming:** This package is named `mcp-titan` for historical reasons and backward compatibility. The current implementation uses the **HOPE architecture** (introduced 2025), which supersedes the original TITAN design. Legacy `TitanMemoryModel` exports exist as compatibility aliases.
+
+**Architecture:** Stdio-first MCP server powered by TensorFlow.js, featuring hierarchical memory (short-term/long-term/archive), retentive sequence modeling, sparse routing, and optional online learning. This README reflects the project state as of November 15th, 2025 and aligns with `src/index.ts`.
 
 ## Requirements
 - Node.js **22.0.0+** (enforced by `package.json` `engines` field)
@@ -76,10 +78,9 @@ Always treat tool responses as authoritative and surface any error text back to 
 
 ## Feature Highlights
 - **Stdio MCP Server:** Implemented with `McpServer` + `StdioServerTransport`; no HTTP layer is active in this release.
-- **Auto-Initialization:** Loads existing checkpoints from `~/.titan_memory` or bootstraps a default config (`inputDim=768`, `memorySlots=5000`, `transformerLayers=6`).
+- **Auto-Initialization:** Loads existing checkpoints from `~/.hope_memory` or bootstraps a default config (`inputDim=256`, `memorySlots=256`, HOPE architecture).
 - **Memory Management:** Vector processing, TF-IDF bootstrap helper, gradient reset, and information-gain pruning when supported by the model.
-- **Online Learner Loop:** `LearnerService` exposes MCP hooks for replay-buffer based updates. A mock tokenizer is installed by default—swap in `AdvancedTokenizer` for real encodings.
-- **Workflow Skeleton:** `src/workflows/` contains orchestrators for release automation, linting, and feedback analysis. These rely on `WorkflowConfig` feature flags defined in `src/types.ts`.
+- **Online Learner Loop:** `LearnerService` exposes MCP hooks for replay-buffer based updates. The tokenizer interface requires proper initialization—integrate `AdvancedTokenizer` for production use.
 - **Training Pipeline:** `scripts/train-model.ts` pipes into `src/training/trainer.ts`, providing synthetic data generation and tokenizer training when no dataset is supplied.
 
 ## Tooling Overview
@@ -90,8 +91,8 @@ The server currently registers **19** MCP tools:
 The `help` tool now derives its listing dynamically from the active registry, so invoke it at runtime to confirm newly added operations. See [docs/api/README.md](docs/api/README.md) for parameter schemas and defaults. The `manifold_step` operation remains on the roadmap—track progress in [ROADMAP_ANALYSIS.md](ROADMAP_ANALYSIS.md).
 
 ## Persistence & Files
-- Memory state is serialized to `~/.titan_memory/memory_state.json`.
-- Saved models live under `~/.titan_memory/model/`.
+- Memory state is serialized to `~/.hope_memory/memory_state.json`.
+- Saved models live under `~/.hope_memory/model/`.
 - MCP checkpoints written via `save_checkpoint` are user-specified JSON files that include tensor shapes for validation on load.
 - Auto-save interval: 60 seconds with exponential back-off retry on transient errors.
 

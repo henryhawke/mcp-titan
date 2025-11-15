@@ -61,6 +61,32 @@ export interface ITensorOps {
   memory(): { numTensors: number; numDataBuffers: number; numBytes: number };
 }
 
+/**
+ * Interface for tokenizer implementations.
+ * Defines the contract for text encoding/decoding with tensor embeddings.
+ */
+export interface ITokenizer {
+  /**
+   * Encodes text into a tensor representation
+   * @param text Input text to encode
+   * @returns Tensor embedding of the text
+   */
+  encode(text: string): ITensor;
+
+  /**
+   * Decodes a tensor back into text
+   * @param tensor Tensor to decode
+   * @returns Decoded text string
+   */
+  decode(tensor: ITensor): string;
+
+  /**
+   * Returns special token IDs used by the tokenizer
+   * @returns Map of special token names to their IDs
+   */
+  getSpecialTokens(): Record<string, number>;
+}
+
 // Memory Configuration Schema
 export const TitanMemoryConfigSchema = z.object({
   inputDim: z.number().int().positive().default(768),
