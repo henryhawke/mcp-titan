@@ -1,8 +1,8 @@
-# MCP Titan Workflow Integration Guide
+# MCP HOPE Workflow Integration Guide
 
 ## Overview
 
-This document describes the complete workflow integration for the MCP Titan tool, enabling seamless integration into any AI agent system for automated software development lifecycle management.
+This document describes the complete workflow integration for the MCP HOPE tool (formerly Titan), enabling seamless integration into any AI agent system for automated software development lifecycle management.
 
 ## Core Workflow Components
 

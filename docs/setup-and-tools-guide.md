@@ -1,6 +1,6 @@
-# Titan Memory MCP Server — Setup & Tooling Guide
+# HOPE Memory MCP Server — Setup & Tooling Guide
 
-This guide is the canonical reference for installing, configuring, and operating the Titan Memory MCP server. It assumes no prior context beyond a fresh clone of the repository and walks through day-one setup all the way to issuing MCP tool calls.
+This guide is the canonical reference for installing, configuring, and operating the HOPE Memory MCP server. It assumes no prior context beyond a fresh clone of the repository and walks through day-one setup all the way to issuing MCP tool calls. Legacy Titan notes remain for backwards compatibility with existing deployments.
 
 ## 1. Environment Checklist
 
@@ -45,7 +45,7 @@ npm start
 npx titan-memory
 ```
 
-The server writes runtime artifacts under `~/.titan_memory/` by default:
+The server writes runtime artifacts under `~/.hope_memory/` by default:
 
 - `model/` — serialized encoder/decoder weights and configuration
 - `memory_state.json` — current short-term/long-term tensors
@@ -64,7 +64,7 @@ On first launch Titan will:
 1. Compile the encoder/decoder graph.
 2. Initialize memory tensors (short-term, long-term, metadata, surprise history).
 3. Create optional research features if enabled in the config (momentum buffers, token-flow queues, forgetting gate variable, hierarchical tiers).
-4. Persist the freshly initialized state to `~/.titan_memory/` for reuse.
+4. Persist the freshly initialized state to `~/.hope_memory/` for reuse.
 
 Subsequent launches automatically load any saved checkpoint before registering MCP tools.
 
@@ -119,7 +119,7 @@ Add the following entry to `~/.cursor/settings.json`:
         "env": {
           "NODE_ENV": "production"
         },
-        "workingDirectory": "~/.titan_memory"
+        "workingDirectory": "~/.hope_memory"
       }
     }
   }
@@ -182,7 +182,7 @@ A minimal warm-up sequence you can replay during smoke tests:
 
 ## 7. Observability & Logs
 
-- Logs stream to `~/.titan_memory/logs/*.jsonl`. Tail them with `npm run tail-logs` (see `package.json` scripts).
+- Logs stream to `~/.hope_memory/logs/*.jsonl`. Tail them with `npm run tail-logs` (see `package.json` scripts).
 - Structured telemetry (per-operation latency, error counters) is available through `ModelTelemetry`. Access it via `health_check` or by reading the `telemetry` section of saved checkpoints.
 - The new momentum pipeline surfaces row-wise norms in `get_memory_state`. Look for the `momentumNorm` field under `meta` to spot unhealthy growth.
 

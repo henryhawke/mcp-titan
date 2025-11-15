@@ -1,5 +1,5 @@
 /**
- * @fileoverview Learner Service - Online Learning Loop for Titan Memory
+ * @fileoverview Learner Service - Online Learning Loop for HOPE Memory
  * 
  * This service implements a ring-buffer replay system with mini-batch updates
  * that mix contrastive, next-token prediction, and masked language modeling.

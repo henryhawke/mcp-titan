@@ -1,4 +1,4 @@
-# Titan Memory MCP Server
+# HOPE Memory MCP Server
 
 Stdio-first Model Context Protocol (MCP) server that pairs a TensorFlow.js-backed memory model with optional online learning and workflow orchestration services. This README reflects the project state as of October 10, 2025 and aligns with the current `src/index.ts` implementation.
 
@@ -17,7 +17,7 @@ npm run build
 npm start   # launches the MCP server over stdio
 ```
 
-The runtime creates `~/.titan_memory/` (override with `--memoryPath` when instantiating `TitanMemoryServer`) and auto-saves the active memory state every 60 seconds.
+The runtime creates `~/.hope_memory/` (override with `--memoryPath` when instantiating `HopeMemoryServer`) and auto-saves the active memory state every 60 seconds.
 
 ### CLI Entrypoint
 The published package exposes a `titan-memory` binary (see `bin` in `package.json`). Use it directly or via `npx`:
@@ -51,7 +51,7 @@ The server only speaks MCP over stdio. Point your client at the executable inste
 Add a custom MCP server, choose “Run a binary on this machine,” and point it at the same `mcp-titan` command. No port configuration is required.
 
 ## LLM System Prompt
-Use the prompt below (or the version tracked in `docs/llm-system-prompt.md`) when wiring Titan into Cursor, Claude, or other MCP-compatible agents.
+Use the prompt below (or the version tracked in `docs/llm-system-prompt.md`) when wiring HOPE into Cursor, Claude, or other MCP-compatible agents.
 
 ```markdown
 You are operating the @henryhawke/mcp-titan MCP memory server. Follow this checklist on every session:

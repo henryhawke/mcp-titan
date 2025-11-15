@@ -1,14 +1,13 @@
-import { TitanMemoryModel } from '../model.js';
-import type { WorkflowConfig, FeedbackConfig, FeedbackItem, TitanMemorySystem } from '../types.js';
+import type { WorkflowConfig, FeedbackConfig, FeedbackItem, HopeMemorySystem } from '../types.js';
 
 export class FeedbackProcessor {
     private config: WorkflowConfig;
-    private memory: TitanMemorySystem;
+    private memory: HopeMemorySystem;
     private feedbackConfig: FeedbackConfig;
     private feedbackBuffer: FeedbackItem[] = [];
     private processingInterval: NodeJS.Timeout | null = null;
 
-    constructor(config: WorkflowConfig, memory: TitanMemorySystem) {
+    constructor(config: WorkflowConfig, memory: HopeMemorySystem) {
         this.config = config;
         this.memory = memory;
         this.feedbackConfig = config.features.feedback;

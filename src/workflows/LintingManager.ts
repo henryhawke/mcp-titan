@@ -1,12 +1,11 @@
-import { TitanMemoryModel } from '../model.js';
-import type { WorkflowConfig, LintConfig, TitanMemorySystem } from '../types.js';
+import type { WorkflowConfig, LintConfig, HopeMemorySystem } from '../types.js';
 
 export class LintingManager {
     private config: WorkflowConfig;
-    private memory: TitanMemorySystem;
+    private memory: HopeMemorySystem;
     private lintConfig: LintConfig;
 
-    constructor(config: WorkflowConfig, memory: TitanMemorySystem) {
+    constructor(config: WorkflowConfig, memory: HopeMemorySystem) {
         this.config = config;
         this.memory = memory;
         this.lintConfig = config.features.linting;

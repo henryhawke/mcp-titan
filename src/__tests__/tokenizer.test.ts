@@ -218,7 +218,7 @@ describe('Tokenizer Module', () => {
     });
   });
 
-  describe('Integration with TitanMemoryModel', () => {
+  describe('Integration with HopeMemoryModel', () => {
     test('should be importable from main index', () => {
       // Just test that the exports are available
       expect(AdvancedTokenizer).toBeDefined();

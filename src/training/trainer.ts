@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as tf from '@tensorflow/tfjs-node';
-import { TitanMemoryModel, TitanMemoryConfig } from '../model.js';
+import { HopeMemoryModel, HopeMemoryConfig } from '../model.js';
 import { AdvancedTokenizer } from '../tokenizer/index.js';
 
 export interface TrainingConfig {
@@ -14,7 +14,7 @@ export interface TrainingConfig {
   sequenceLength: number;
   vocabSize: number;
   embeddingDim: number;
-  modelConfig: Partial<TitanMemoryConfig>;
+  modelConfig: Partial<HopeMemoryConfig>;
 }
 
 export interface TrainingMetrics {
@@ -27,9 +27,9 @@ export interface TrainingMetrics {
   validationAccuracy?: number;
 }
 
-export class TitanTrainer {
+export class HopeTrainer {
   private config: TrainingConfig;
-  private model!: TitanMemoryModel;
+  private model!: HopeMemoryModel;
   private tokenizer!: AdvancedTokenizer;
   private trainingData: string[] = [];
   private validationData: string[] = [];
@@ -52,7 +52,7 @@ export class TitanTrainer {
    * Complete training pipeline
    */
   async train(): Promise<void> {
-    console.log('🚀 Starting Titan Memory Model training pipeline...');
+    console.log('🚀 Starting HOPE Memory Model training pipeline...');
 
     try {
       // Step 1: Download and prepare training data
@@ -260,9 +260,9 @@ export class TitanTrainer {
       learningRate: this.config.learningRate,
       vocabSize: this.config.vocabSize,
       ...this.config.modelConfig
-    } as TitanMemoryConfig;
+    } as HopeMemoryConfig;
 
-    this.model = new TitanMemoryModel();
+    this.model = new HopeMemoryModel();
     await this.model.initialize(modelConfig);
 
     console.log('✅ Model initialized with configuration:', modelConfig);
@@ -559,4 +559,4 @@ export class TitanTrainer {
   }
 }
 
-export default TitanTrainer;
+export default HopeTrainer;

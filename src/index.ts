@@ -1,7 +1,7 @@
 // Import polyfills first
 import './utils/polyfills.js';
 
-// Henry's Titan Memory Server
+// HOPE Memory Server entry point
 import { z } from "zod";
 import * as tf from '@tensorflow/tfjs-node';
 import type { TensorContainer } from '@tensorflow/tfjs-core';
@@ -14,8 +14,8 @@ const packageJson = require('../package.json') as { version?: string };
 
 import type { IMemoryState, SerializedAuxiliaryMemoryState } from './types.js';
 import { wrapTensor, unwrapTensor } from './types.js';
-import { TitanMemoryModel } from './model.js';
-export { TitanMemoryModel } from './model.js';
+import { HopeMemoryModel } from './model.js';
+export { HopeMemoryModel } from './model.js';
 export { AdvancedTokenizer, BPETokenizer, TokenEmbedding, MaskedLanguageModelHead } from './tokenizer/index.js';
 export type { TokenizerConfig, TokenizationResult, BPEConfig, EmbeddingConfig, MLMConfig } from './tokenizer/index.js';
 export { LearnerService, type LearnerConfig } from './learner.js';
@@ -34,6 +34,7 @@ interface SerializedMemoryState {
   shapes: Record<string, number[]>;
   shortTerm: number[];
   longTerm: number[];
+  archive?: number[];
   meta: number[];
   timestamps: number[];
   accessCounts: number[];
@@ -43,6 +44,8 @@ interface SerializedMemoryState {
   forgettingGate?: number[];
   tokenFlowHistory?: number[];
   flowWeights?: number[];
+  levelIndex?: number[];
+  surpriseBuffer?: number[];
   auxiliary?: SerializedAuxiliaryMemoryState;
   timestamp?: number;
 }
@@ -61,15 +64,16 @@ interface MemoryStats {
 }
 
 const versionFromPackage = typeof packageJson.version === 'string' ? packageJson.version : '0.0.0';
-export const TITAN_MEMORY_VERSION = versionFromPackage;
+export const HOPE_MEMORY_VERSION = versionFromPackage;
+export const TITAN_MEMORY_VERSION = HOPE_MEMORY_VERSION;
 
 /**
- * Titan Memory Server - A neural memory system that can learn and predict sequences
- * while maintaining state through a memory vector.
+ * HOPE Memory Server - Continuum memory system that can learn and predict sequences
+ * while maintaining state through a retentive continuum memory vector.
  */
-export class TitanMemoryServer {
+export class HopeMemoryServer {
   private server: McpServer;
-  private model!: TitanMemoryModel;
+  private model!: HopeMemoryModel;
   private vectorProcessor: VectorProcessor;
   private memoryState: IMemoryState;
   private learnerService?: LearnerService;
@@ -83,23 +87,30 @@ export class TitanMemoryServer {
 
   constructor(options: { memoryPath?: string } = {}) {
     this.server = new McpServer({
-      name: "Titan Memory",
-      version: TITAN_MEMORY_VERSION,
-      description: "A neural memory system for LLMs that can learn and predict sequences while maintaining state"
+      name: "HOPE Memory",
+      version: HOPE_MEMORY_VERSION,
+      description: "A retentive continuum memory system that learns and adapts through MCP tool calls"
     });
     this.vectorProcessor = VectorProcessor.getInstance();
-    this.memoryPath = options.memoryPath ?? path.join(process.cwd(), '.titan_memory');
+    this.memoryPath = options.memoryPath ?? path.join(process.cwd(), '.hope_memory');
     this.modelDir = path.join(this.memoryPath, 'model');
     this.memoryState = this.initializeEmptyState();
+    this.syncModelState();
 
     this.logger = StructuredLogger.getInstance(path.join(this.memoryPath, 'logs'));
     this.logger.setLogLevel(process.env.LOG_LEVEL === 'DEBUG' ? LogLevel.DEBUG : LogLevel.INFO);
-    this.logger.info('server', 'TitanMemoryServer initialized', {
+    this.logger.info('server', 'HopeMemoryServer initialized', {
       memoryPath: this.memoryPath,
-      version: TITAN_MEMORY_VERSION
+      version: HOPE_MEMORY_VERSION
     });
 
     this.registerTools();
+  }
+
+  private syncModelState(): void {
+    if (this.model && typeof (this.model as any).hydrateMemoryState === 'function') {
+      (this.model as any).hydrateMemoryState(this.memoryState);
+    }
   }
 
   private registerToolDefinition(
@@ -113,35 +124,20 @@ export class TitanMemoryServer {
   }
 
   private initializeEmptyState(): IMemoryState {
-    return tf.tidy(() => {
-      const config = this.model?.getConfig();
-      const memoryDim = config?.memoryDim ?? 1024;
-      const memorySlots = config?.memorySlots ?? 5000;
-      const tokenFlowWindow = config?.tokenFlowWindow ?? 10;
+    if (this.model && typeof (this.model as any).createInitialState === 'function') {
+      return (this.model as any).createInitialState();
+    }
 
+    return tf.tidy(() => {
+      const memoryDim = 256;
       const state: IMemoryState = {
         shortTerm: wrapTensor(tf.tensor2d([], [0, memoryDim])),
         longTerm: wrapTensor(tf.tensor2d([], [0, memoryDim])),
-        meta: wrapTensor(tf.tensor2d([], [0, 5])),
+        meta: wrapTensor(tf.tensor2d([], [0, 4])),
         timestamps: wrapTensor(tf.tensor1d([])),
         accessCounts: wrapTensor(tf.tensor1d([])),
         surpriseHistory: wrapTensor(tf.tensor1d([]))
       };
-
-      if (config?.enableMomentum) {
-        state.momentumState = wrapTensor(tf.zeros([memorySlots, memoryDim]));
-        state.momentumDecay = config.momentumDecayRate;
-      }
-
-      if (config?.enableForgettingGate) {
-        state.forgettingGate = wrapTensor(tf.zeros([memorySlots]));
-      }
-
-      if (config?.enableTokenFlow) {
-        state.tokenFlowHistory = wrapTensor(tf.zeros([tokenFlowWindow, memoryDim]));
-        state.flowWeights = wrapTensor(tf.zeros([tokenFlowWindow]));
-      }
-
       return state;
     });
   }
@@ -150,6 +146,7 @@ export class TitanMemoryServer {
     const shapes: Record<string, number[]> = {
       shortTerm: unwrapTensor(this.memoryState.shortTerm).shape,
       longTerm: unwrapTensor(this.memoryState.longTerm).shape,
+      archive: (this.memoryState as any).archive ? unwrapTensor((this.memoryState as any).archive).shape : [0, 0],
       meta: unwrapTensor(this.memoryState.meta).shape,
       timestamps: unwrapTensor(this.memoryState.timestamps).shape,
       accessCounts: unwrapTensor(this.memoryState.accessCounts).shape,
@@ -173,10 +170,19 @@ export class TitanMemoryServer {
       shapes,
       shortTerm: Array.from(unwrapTensor(this.memoryState.shortTerm).dataSync()),
       longTerm: Array.from(unwrapTensor(this.memoryState.longTerm).dataSync()),
+      archive: (this.memoryState as any).archive
+        ? Array.from(unwrapTensor((this.memoryState as any).archive).dataSync())
+        : undefined,
       meta: Array.from(unwrapTensor(this.memoryState.meta).dataSync()),
       timestamps: Array.from(unwrapTensor(this.memoryState.timestamps).dataSync()),
       accessCounts: Array.from(unwrapTensor(this.memoryState.accessCounts).dataSync()),
-      surpriseHistory: Array.from(unwrapTensor(this.memoryState.surpriseHistory).dataSync())
+      surpriseHistory: Array.from(unwrapTensor(this.memoryState.surpriseHistory).dataSync()),
+      levelIndex: (this.memoryState as any).levelIndex
+        ? Array.from(unwrapTensor((this.memoryState as any).levelIndex).dataSync())
+        : undefined,
+      surpriseBuffer: (this.memoryState as any).surpriseBuffer
+        ? Array.from(unwrapTensor((this.memoryState as any).surpriseBuffer).dataSync())
+        : undefined
     };
 
     if (this.memoryState.momentumState) {
@@ -207,7 +213,7 @@ export class TitanMemoryServer {
     const shapes = state.shapes ?? {};
 
     this.memoryState = tf.tidy(() => {
-      const restored: IMemoryState = {
+      const restored: IMemoryState & { archive?: TensorContainer; levelIndex?: TensorContainer; surpriseBuffer?: TensorContainer } = {
         shortTerm: wrapTensor(tf.tensor2d(state.shortTerm, shapes.shortTerm as [number, number] ?? [state.shortTerm.length, 1])),
         longTerm: wrapTensor(tf.tensor2d(state.longTerm, shapes.longTerm as [number, number] ?? [state.longTerm.length, 1])),
         meta: wrapTensor(tf.tensor2d(state.meta, shapes.meta as [number, number] ?? [state.meta.length, 1])),
@@ -215,6 +221,16 @@ export class TitanMemoryServer {
         accessCounts: wrapTensor(tf.tensor1d(state.accessCounts)),
         surpriseHistory: wrapTensor(tf.tensor1d(state.surpriseHistory))
       };
+
+      if (state.archive && shapes.archive) {
+        restored.archive = wrapTensor(tf.tensor2d(state.archive, shapes.archive as [number, number]));
+      }
+      if (state.levelIndex) {
+        restored.levelIndex = wrapTensor(tf.tensor1d(state.levelIndex));
+      }
+      if (state.surpriseBuffer) {
+        restored.surpriseBuffer = wrapTensor(tf.tensor1d(state.surpriseBuffer));
+      }
 
       if (state.momentumState && shapes.momentumState) {
         restored.momentumState = wrapTensor(tf.tensor2d(state.momentumState, shapes.momentumState as [number, number]));
@@ -231,9 +247,10 @@ export class TitanMemoryServer {
       if (state.flowWeights && shapes.flowWeights) {
         restored.flowWeights = wrapTensor(tf.tensor(state.flowWeights, shapes.flowWeights));
       }
-
       return restored;
     });
+
+    this.syncModelState();
 
     if (state.auxiliary) {
       this.model?.restoreAuxiliaryState(state.auxiliary);
@@ -407,7 +424,7 @@ export class TitanMemoryServer {
     // Init model tool
     this.registerToolDefinition(
       'init_model',
-      "Initialize the Titan Memory model",
+      "Initialize the HOPE Memory model",
       z.object({
         inputDim: z.number().int().positive().default(768).describe("Input dimension size"),
         hiddenDim: z.number().int().positive().default(512).describe("Hidden dimension size"),
@@ -425,7 +442,7 @@ export class TitanMemoryServer {
       }),
       async (params) => {
         try {
-          this.model = new TitanMemoryModel();
+          this.model = new HopeMemoryModel();
           const config = {
             inputDim: params.inputDim,
             hiddenDim: params.hiddenDim ?? 512,
@@ -447,12 +464,13 @@ export class TitanMemoryServer {
 
           await this.model.initialize(config);
           this.memoryState = this.initializeEmptyState();
+          this.syncModelState();
           this.isInitialized = true;
 
           return {
             content: [{
               type: "text",
-              text: `Titan Memory Model initialized successfully with configuration: ${JSON.stringify(config, null, 2)}`
+              text: `HOPE Memory Model initialized successfully with configuration: ${JSON.stringify(config, null, 2)}`
             }]
           };
         } catch (error) {
@@ -522,6 +540,8 @@ export class TitanMemoryServer {
 
           // Update memory state
           this.memoryState = result.memoryUpdate.newState;
+          this.syncModelState();
+          this.syncModelState();
 
           input.dispose();
 
@@ -889,7 +909,7 @@ export class TitanMemoryServer {
             memoryState,
             inputDim: this.model.getConfig().inputDim, // Add for validation on load
             config: this.model.getConfig(),
-            version: TITAN_MEMORY_VERSION,
+            version: HOPE_MEMORY_VERSION,
             timestamp: Date.now()
           };
 
@@ -1309,11 +1329,11 @@ export class TitanMemoryServer {
       const modelExists = await fs.access(modelMetadataPath).then(() => true).catch(() => false);
 
       if (modelExists) {
-        this.model = new TitanMemoryModel();
+        this.model = new HopeMemoryModel();
         await this.model.loadModel(this.modelDir);
       } else {
         // Initialize with default config
-        this.model = new TitanMemoryModel();
+        this.model = new HopeMemoryModel();
         await this.model.initialize({
           inputDim: 768,
           memorySlots: 5000,
@@ -1329,6 +1349,8 @@ export class TitanMemoryServer {
       }
 
       this.memoryState = this.initializeEmptyState();
+      this.syncModelState();
+      this.syncModelState();
 
       // Try to load existing memory state
       const memoryStateExists = await fs.access(path.join(this.memoryPath, 'memory_state.json')).then(() => true).catch(() => false);
@@ -1360,7 +1382,7 @@ export class TitanMemoryServer {
     } catch (error) {
       // Silent auto-initialization failure
       // Continue with basic initialization
-      this.model = new TitanMemoryModel();
+      this.model = new HopeMemoryModel();
       await this.model.initialize({
         inputDim: 768,
         memorySlots: 5000,
@@ -1370,6 +1392,7 @@ export class TitanMemoryServer {
         enableEpisodicSemanticDistinction: true
       });
       this.memoryState = this.initializeEmptyState();
+      this.syncModelState();
     }
   }
 
@@ -1493,7 +1516,7 @@ export class TitanMemoryServer {
       status: 'healthy',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
-      version: TITAN_MEMORY_VERSION,
+      version: HOPE_MEMORY_VERSION,
       checkType
     };
 
@@ -1691,5 +1714,5 @@ export class TitanMemoryServer {
 }
 
 // Create and run server
-const server = new TitanMemoryServer();
+const server = new HopeMemoryServer();
 server.run().catch(() => process.exit(1));

@@ -1,6 +1,6 @@
-# Titan Memory MCP Server Documentation
+# HOPE Memory MCP Server Documentation
 
-Welcome to the Titan Memory MCP Server documentation! This documentation will help you understand, install, and use the server effectively.
+Welcome to the HOPE Memory MCP Server documentation! This documentation will help you understand, install, and use the server effectively. Legacy Titan materials are retained for reference; see [architecture-hope.md](architecture-hope.md) for the current implementation details.
 
 ## Table of Contents
 
@@ -45,7 +45,7 @@ The Titan Memory MCP Server is a Model Context Protocol implementation that prov
 
 ```mermaid
 graph TD
-    A[Cursor IDE] -->|MCP| B[Titan Memory Server]
+    A[Cursor IDE] -->|MCP| B[HOPE Memory Server]
     B --> C[Memory State]
     B --> D[TensorFlow.js]
     B --> E[HTTP API]

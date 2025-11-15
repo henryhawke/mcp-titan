@@ -1,11 +1,11 @@
-# Titan Memory MCP Server API
+# HOPE Memory MCP Server API
 
-Updated October 10, 2025 to reflect the current stdio-based implementation that ships with version 3.0.0 of `@henryhawke/mcp-titan` (server advertises `Titan Memory` v1.2.0).
+Updated October 10, 2025 to reflect the current stdio-based implementation that ships with version 3.0.0 of `@henryhawke/mcp-titan` (server advertises `HOPE Memory` v1.2.0 with Titan aliases for compatibility).
 
 ## Overview
 - **Transport:** Model Context Protocol over stdio (`StdioServerTransport`). No HTTP endpoints are exposed in this build.
-- **Persistence:** Memory state and model artifacts live under `~/.titan_memory/` by default. The server auto-saves every 60 seconds and reloads on startup when files exist.
-- **Model stack:** `TitanMemoryModel` backed by TensorFlow.js (Node backend) with optional learner loop and tokenizer services.
+- **Persistence:** Memory state and model artifacts live under `~/.hope_memory/` by default. The server auto-saves every 60 seconds and reloads on startup when files exist.
+- **Model stack:** `HopeMemoryModel` backed by TensorFlow.js (Node backend) with optional learner loop and tokenizer services.
 - **Source of truth:** All schema definitions are in `src/index.ts`, `src/types.ts`, and `src/learner.ts`. See [docs/architecture-overview.md](../architecture-overview.md) for a component map.
 
 ## Requirements & Installation
@@ -43,7 +43,7 @@ npm run build && npm start
         "env": {
           "NODE_ENV": "production"
         },
-        "workingDirectory": "~/.titan_memory"
+        "workingDirectory": "~/.hope_memory"
       }
     }
   }
@@ -59,7 +59,7 @@ Seventeen tools are registered in `src/index.ts` via `this.server.tool`. The hel
 | --- | --- | --- | --- |
 | `help` | discovery | Lists tools and optional details | `tool?: string`, `category?: string`, `showExamples?: boolean`, `verbose?: boolean` |
 | `bootstrap_memory` | onboarding | Seeds memory from URL or raw corpus, builds TF-IDF fallback vectors | `source: string (URL or plain text)` |
-| `init_model` | lifecycle | Creates/initializes `TitanMemoryModel` | See [`TitanMemoryConfig` defaults](#titanmemoryconfig-defaults) |
+| `init_model` | lifecycle | Creates/initializes `HopeMemoryModel` | See [`HopeMemoryConfig` defaults](#hopememoryconfig-defaults) |
 | `memory_stats` | observability | Returns raw memory state snapshot via `model.getMemoryState()` | none |
 | `forward_pass` | inference | Runs `model.forward` with automatic memory update | `x: string | number[]`, `memoryState?: IMemoryState` |
 | `train_step` | training | Executes supervised step between current/next tensors | `x_t`, `x_next` (string or numeric array) |
@@ -77,36 +77,22 @@ Seventeen tools are registered in `src/index.ts` via `this.server.tool`. The hel
 
 > **Note:** `manifold_step`, `encode_text`, `get_surprise_metrics`, `analyze_memory`, and `predict_next` are roadmap items. They are referenced in strategy docs but have no MCP handlers today.
 
-### `TitanMemoryConfig` Defaults
-The `init_model` schema ultimately uses the `TitanMemoryConfigSchema` from `src/types.ts` with these defaults:
+### `HopeMemoryConfig` Defaults
+The `init_model` schema ultimately uses the `HopeMemoryConfigSchema` from `src/types.ts` with these defaults:
 
 | Field | Default |
 | --- | --- |
-| `inputDim` | `768`
-| `hiddenDim` | `512`
-| `memoryDim` | `1024`
-| `transformerLayers` | `6` (max 12 enforced by schema)
-| `numHeads` | `8`
-| `ffDimension` | `2048`
+| `inputDim` | `256`
+| `hiddenDim` | `192`
+| `memoryDim` | `256`
+| `shortTermSlots` | `64`
+| `longTermSlots` | `256`
+| `archiveSlots` | `512`
+| `learningRate` | `0.001`
 | `dropoutRate` | `0.1`
-| `maxSequenceLength` | `512`
-| `memorySlots` | `5000`
-| `similarityThreshold` | `0.65`
-| `surpriseDecay` | `0.9`
-| `pruningInterval` | `1000`
-| `gradientClip` | `1.0`
-| `enableMomentum` | `true`
-| `momentumDecayRate` | `0.9`
-| `momentumLearningRate` | `0.001`
-| `momentumScoreGain` | `0.5`
-| `momentumScoreToDecay` | `0.2`
-| `momentumSurpriseGain` | `0.25`
-| `momentumScoreFloor` | `0.001`
-| `enableForgettingGate` | `false`
-| `forgettingGateInit` | `0.1`
-| `enableTokenFlow` | `true`
-| `tokenFlowWindow` | `10`
-| `enableHierarchicalMemory` | `false`
+| `promotionThreshold` | `0.05`
+| `surpriseRetention` | `0.85`
+| `routerTopK` | `2`
 
 ### `LearnerService` Defaults
 When `init_learner` runs without overrides, it instantiates `LearnerService` with:
@@ -127,7 +113,7 @@ When `init_learner` runs without overrides, it instantiates `LearnerService` wit
 By default, `init_learner` injects a lightweight mock tokenizer that produces random vectors. Replace `this.tokenizer` on the `TitanMemoryServer` instance if you want deterministic encodings before adding training samples.
 
 ## Persistence & Auto-Initialization
-- On launch, the server ensures `~/.titan_memory/` exists, then looks for `model/model.json` and `memory_state.json` under that directory.
+- On launch, the server ensures `~/.hope_memory/` exists, then looks for `model/model.json` and `memory_state.json` under that directory.
 - If a trained model is present, it loads it; otherwise it initializes a fresh model using the defaults above and immediately saves the artifact for future sessions.
 - Checkpoints written via `save_checkpoint` include tensor shapes for validation during `load_checkpoint` and store the current model config alongside the flattened memory arrays.
 
