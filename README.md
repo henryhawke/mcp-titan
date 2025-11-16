@@ -38,7 +38,7 @@ HOPE: *Recalls context* → "Here's a TypeScript React component for your projec
 
 ---
 
-## Key Features (In Plain English)
+## Key Features
 
 ### 🧠 **Three-Tier Memory System**
 Like your brain, HOPE has multiple memory levels:
