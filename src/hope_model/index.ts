@@ -49,6 +49,17 @@ interface ForwardArtifacts {
   decision: RoutingDecision;
 }
 
+/**
+ * HOPE Paper: Token Flow Tracking
+ * Captures sequential dependencies beyond momentary surprise
+ */
+export interface TokenFlowState {
+  history: number[][];      // Recent token embeddings
+  weights: number[];        // Recency × similarity weights
+  windowSize: number;       // Sliding window (default 32)
+  decay: number;            // Temporal decay (default 0.95)
+}
+
 export class HopeMemoryModel implements IMemoryModel {
   private config: HopeMemoryConfig;
   private readonly continuumMemory: ContinuumMemory;
@@ -63,6 +74,7 @@ export class HopeMemoryModel implements IMemoryModel {
   private optimizer: tf.AdamOptimizer;
   private retentionState?: RetentionState;
   private latestMemoryState: HopeMemoryState;
+  private tokenFlowState: TokenFlowState;
 
   constructor(config: Partial<HopeMemoryConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -73,7 +85,13 @@ export class HopeMemoryModel implements IMemoryModel {
       longTermSlots: this.config.longTermSlots,
       archiveSlots: this.config.archiveSlots,
       promotionThreshold: this.config.promotionThreshold,
-      surpriseRetention: this.config.surpriseRetention
+      surpriseRetention: this.config.surpriseRetention,
+      // HOPE paper features
+      momentumDecay: 0.9,
+      enableMomentum: this.config.enableMomentum ?? true,
+      enableForgettingGate: this.config.enableForgettingGate ?? true,
+      baseForgettingRate: 0.1,
+      surpriseForgettingWeight: 0.3
     };
     this.continuumMemory = new ContinuumMemory(memoryConfig);
 
@@ -104,6 +122,12 @@ export class HopeMemoryModel implements IMemoryModel {
     this.optimizer = tf.train.adam(this.config.learningRate);
     this.retentionState = this.retentiveCore.initState(1);
     this.latestMemoryState = this.continuumMemory.initialize();
+    this.tokenFlowState = {
+      history: [],
+      weights: [],
+      windowSize: 32,
+      decay: 0.95
+    };
   }
 
   public async initialize(config?: Partial<HopeMemoryConfig>): Promise<void> {
@@ -378,6 +402,10 @@ export class HopeMemoryModel implements IMemoryModel {
   private computeForward(input: tf.Tensor2D, memoryState: HopeMemoryState, updateState: boolean): ForwardArtifacts {
     return tidyMemoryState<ForwardArtifacts>(() => {
       const normalizedInput = this.ensure2d(input);
+
+      // HOPE Paper: Update token flow before routing
+      this.updateTokenFlow(normalizedInput);
+
       const readWeights = this.memoryRouter.route(this.retentionState?.hidden ?? normalizedInput, memoryState);
       const memoryRead = this.continuumMemory.read(memoryState, normalizedInput, readWeights.weights);
       const coreInput = tf.concat([normalizedInput, memoryRead], 1);
@@ -387,8 +415,11 @@ export class HopeMemoryModel implements IMemoryModel {
 
       let updatedState = memoryState;
       if (updateState) {
+        // HOPE Paper: Weight surprise by token flow for sequential dependencies
+        const weightedSurprise = this.weightSurpriseByTokenFlow(readWeights.surprise);
+
         updatedState = this.continuumMemory.write(memoryState, outputs.slice([outputs.shape[0] - 1, 0], [1, -1]), {
-          surprise: readWeights.surprise,
+          surprise: weightedSurprise,
           timestamp: Date.now(),
           routeWeights: readWeights.weights
         });
@@ -436,6 +467,89 @@ export class HopeMemoryModel implements IMemoryModel {
       return tensor;
     }
     return tensor.reshape([tensor.shape[0] ?? 1, this.config.inputDim]);
+  }
+
+  /**
+   * HOPE Paper: Update token flow tracking
+   * Maintains a sliding window of recent embeddings with recency-weighted similarity
+   */
+  private updateTokenFlow(currentEmbedding: tf.Tensor2D): void {
+    if (!this.config.enableTokenFlow) {
+      return;
+    }
+
+    const embedding = currentEmbedding.arraySync()[0];
+
+    // Add to history with sliding window
+    this.tokenFlowState.history.push(embedding);
+    if (this.tokenFlowState.history.length > this.tokenFlowState.windowSize) {
+      this.tokenFlowState.history.shift();
+    }
+
+    // Compute recency × similarity weights
+    const weights = this.tokenFlowState.history.map((histEmb, i) => {
+      const recency = Math.pow(
+        this.tokenFlowState.decay,
+        this.tokenFlowState.history.length - i - 1
+      );
+      const similarity = this.cosineSimilarity(embedding, histEmb);
+      return recency * similarity;
+    });
+
+    this.tokenFlowState.weights = weights;
+  }
+
+  /**
+   * Compute cosine similarity between two embeddings
+   */
+  private cosineSimilarity(a: number[], b: number[]): number {
+    const minLen = Math.min(a.length, b.length);
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+
+    for (let i = 0; i < minLen; i++) {
+      dotProduct += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
+    }
+
+    const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+    return denominator > 0 ? dotProduct / denominator : 0;
+  }
+
+  /**
+   * HOPE Paper: Weight surprise by token flow strength
+   * Integrates sequential dependency into surprise calculation
+   */
+  private weightSurpriseByTokenFlow(surprise: number): number {
+    if (!this.config.enableTokenFlow || this.tokenFlowState.weights.length === 0) {
+      return surprise;
+    }
+
+    const flowStrength =
+      this.tokenFlowState.weights.reduce((a, b) => a + b, 0) /
+      this.tokenFlowState.weights.length;
+
+    // Flow weight factor: how much sequence context affects surprise
+    const flowWeightFactor = 0.3;
+    return surprise * (1 + flowWeightFactor * flowStrength);
+  }
+
+  /**
+   * Get current token flow metrics for debugging/analysis
+   */
+  public getTokenFlowMetrics(): { historySize: number; averageWeight: number; flowStrength: number } {
+    const averageWeight =
+      this.tokenFlowState.weights.length > 0
+        ? this.tokenFlowState.weights.reduce((a, b) => a + b, 0) / this.tokenFlowState.weights.length
+        : 0;
+
+    return {
+      historySize: this.tokenFlowState.history.length,
+      averageWeight,
+      flowStrength: averageWeight
+    };
   }
 
   // MCP Server compatibility methods

@@ -161,7 +161,7 @@ export interface IMemoryState {
   // Research Paper Extensions (Equations 32-33)
   momentumState?: ITensor;      // S_t: Momentum term for memory updates
   momentumDecay?: number;       // η_t: Momentum decay parameter
-  forgettingGate?: ITensor;     // α_t: Learnable forgetting gate parameter
+  forgettingGate?: ITensor | number;     // α_t: Learnable forgetting gate parameter (scalar)
 
   // Token Flow Tracking (Section 3.1)
   tokenFlowHistory?: ITensor;   // Sequential token dependency tracking
