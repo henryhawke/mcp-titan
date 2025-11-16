@@ -1,4 +1,5 @@
 import * as tf from '@tensorflow/tfjs-node';
+import { tidyMemoryState } from './type_utils.js';
 
 export interface FilterState {
   carry: tf.Tensor2D;
@@ -48,28 +49,28 @@ export class SelectiveStateSpace {
   }
 
   public initState(batchSize: number): FilterState {
-    return tf.tidy(() => ({
-      carry: tf.zeros([batchSize, this.config.hiddenDim]),
-      bandwidth: tf.zeros([batchSize, this.config.hiddenDim])
+    return tidyMemoryState(() => ({
+      carry: tf.zeros([batchSize, this.config.hiddenDim]) as tf.Tensor2D,
+      bandwidth: tf.zeros([batchSize, this.config.hiddenDim]) as tf.Tensor2D
     }));
   }
 
   public step(input: tf.Tensor2D, prevState: FilterState): FilterStepResult {
-    return tf.tidy(() => {
+    return tidyMemoryState(() => {
       const projectedInput = tf.matMul(input, this.inputKernel);
       const carryContribution = tf.matMul(prevState.carry, this.carryKernel);
-      const candidate = tf.tanh(tf.add(projectedInput, tf.add(carryContribution, this.bias)));
+      const candidate = tf.tanh(tf.add(projectedInput, tf.add(carryContribution, this.bias))) as tf.Tensor2D;
 
       const gateInput = tf.concat([input, prevState.carry], 1);
       const rawBandwidth = tf.add(tf.matMul(gateInput, this.bandwidthKernel), this.bandwidthBias);
-      const retentionGate = tf.sigmoid(rawBandwidth);
+      const retentionGate = tf.sigmoid(rawBandwidth) as tf.Tensor2D;
 
       const forgetGate = tf.sub(tf.onesLike(retentionGate), retentionGate);
-      const newCarry = tf.add(tf.mul(retentionGate, prevState.carry), tf.mul(forgetGate, candidate));
+      const newCarry = tf.add(tf.mul(retentionGate, prevState.carry), tf.mul(forgetGate, candidate)) as tf.Tensor2D;
 
       let output = newCarry;
       if (this.config.dropoutRate > 0) {
-        output = tf.dropout(output, this.config.dropoutRate);
+        output = tf.dropout(output, this.config.dropoutRate) as tf.Tensor2D;
       }
 
       return {
@@ -88,14 +89,14 @@ export class SelectiveStateSpace {
     state: FilterState;
     gates: tf.Tensor2D;
   } {
-    return tf.tidy(() => {
+    return tidyMemoryState(() => {
       let state = { ...initialState };
-      const outputs: tf.Tensor[] = [];
-      const gates: tf.Tensor[] = [];
+      const outputs: tf.Tensor2D[] = [];
+      const gates: tf.Tensor2D[] = [];
 
       const timeSteps = inputs.shape[0];
       for (let i = 0; i < timeSteps; i += 1) {
-        const stepInput = inputs.slice([i, 0], [1, inputs.shape[1]]);
+        const stepInput = inputs.slice([i, 0], [1, inputs.shape[1]]) as tf.Tensor2D;
         const { state: newState, output, retentionGate } = this.step(stepInput, state);
         outputs.push(output);
         gates.push(retentionGate);
@@ -103,9 +104,9 @@ export class SelectiveStateSpace {
       }
 
       return {
-        outputs: tf.concat(outputs, 0),
+        outputs: tf.concat(outputs, 0) as tf.Tensor2D,
         state,
-        gates: tf.concat(gates, 0)
+        gates: tf.concat(gates, 0) as tf.Tensor2D
       };
     });
   }

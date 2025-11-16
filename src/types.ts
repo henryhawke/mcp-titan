@@ -265,7 +265,7 @@ export interface IMemoryModel {
   getMemoryState(): IMemoryState;
   resetMemory(): void;
   getMemoryState(): any;
-  encodeText(text: string): Promise<tf.Tensor1D>;
+  encodeText(text: string): Promise<tf.Tensor2D>;
   recallMemory(query: string, topK?: number): Promise<tf.Tensor2D[]>;
   storeMemory(text: string): Promise<void>;
   distillMemories?(similarMemories: tf.Tensor2D[]): tf.Tensor2D;
@@ -594,7 +594,7 @@ export interface IMemoryModel {
   get_memory_state(): any;
 
   // Enhanced functionality
-  encodeText(text: string): Promise<tf.Tensor1D>;
+  encodeText(text: string): Promise<tf.Tensor2D>;
   recallMemory(query: string, topK?: number): Promise<tf.Tensor2D[]>;
   storeMemory(text: string): Promise<void>;
 
