@@ -9,6 +9,11 @@ export interface ContinuumMemoryConfig {
   archiveSlots: number;
   promotionThreshold: number;
   surpriseRetention: number;
+  momentumDecay?: number;          // eta_t in HOPE paper (default: 0.9)
+  enableMomentum?: boolean;        // Enable momentum-based updates
+  enableForgettingGate?: boolean;  // Enable adaptive forgetting
+  baseForgettingRate?: number;     // Base alpha_t (default: 0.1)
+  surpriseForgettingWeight?: number; // How much surprise affects forgetting (default: 0.3)
 }
 
 export interface MemoryWriteMetadata {
@@ -36,6 +41,9 @@ export type HopeMemoryState = Omit<IMemoryState, BaseStateOverrides> & {
   archive: tf.Tensor2D;
   levelIndex: tf.Tensor1D;
   surpriseBuffer: tf.Tensor1D;
+  // HOPE paper: Momentum-based memory updates (Equations 32-33)
+  momentumState?: tf.Tensor2D;      // S_t in the paper
+  forgettingGate?: number;          // alpha_t in the paper
 };
 
 const EPSILON = 1e-6;
@@ -57,7 +65,10 @@ export class ContinuumMemory {
       accessCounts: tf.tensor1d([]),
       surpriseHistory: tf.tensor1d([]),
       levelIndex: tf.tensor1d([]),
-      surpriseBuffer: tf.tensor1d([])
+      surpriseBuffer: tf.tensor1d([]),
+      // Initialize momentum state if enabled
+      momentumState: this.config.enableMomentum ? tf.tensor2d([], [0, this.config.memoryDim]) : undefined,
+      forgettingGate: 0
     }));
   }
 
@@ -71,20 +82,168 @@ export class ContinuumMemory {
       accessCounts: state.accessCounts.clone(),
       surpriseHistory: state.surpriseHistory.clone(),
       levelIndex: state.levelIndex.clone(),
-      surpriseBuffer: state.surpriseBuffer.clone()
+      surpriseBuffer: state.surpriseBuffer.clone(),
+      momentumState: state.momentumState?.clone(),
+      forgettingGate: state.forgettingGate
     }));
+  }
+
+  /**
+   * HOPE Paper: Compute adaptive forgetting gate (alpha_t)
+   * Higher surprise = lower forgetting (retain more)
+   * Lower surprise = higher forgetting (forget more redundant info)
+   */
+  public updateForgettingGate(surprise: number): number {
+    if (!this.config.enableForgettingGate) {
+      return 0; // No forgetting if disabled
+    }
+
+    const baseAlpha = this.config.baseForgettingRate ?? 0.1;
+    const surpriseWeight = this.config.surpriseForgettingWeight ?? 0.3;
+
+    // Inverse relationship: high surprise = low forgetting
+    // Clamp to [0, 0.5] to prevent excessive forgetting
+    const alpha_t = Math.min(0.5, baseAlpha * (1 - surpriseWeight * Math.min(surprise, 1.0)));
+    return alpha_t;
+  }
+
+  /**
+   * HOPE Paper Equation 33: Momentum update
+   * S_t = diag(eta_t) * S_{t-1} - diag(theta_t) * (M_{t-1} * k_t^T * k_t - v_t^T * k_t)
+   *
+   * This implements momentum-based memory updates to prevent catastrophic forgetting
+   */
+  public computeMomentumUpdate(
+    prevMomentum: tf.Tensor2D,
+    currentMemory: tf.Tensor2D,
+    keys: tf.Tensor2D,
+    values: tf.Tensor2D,
+    learningRate: number
+  ): tf.Tensor2D {
+    return tidyTensor2D(() => {
+      const eta = this.config.momentumDecay ?? 0.9;
+
+      // Handle empty previous momentum
+      if (prevMomentum.shape[0] === 0) {
+        return tf.zerosLike(currentMemory);
+      }
+
+      // Ensure dimensions match
+      const momentumSize = Math.min(prevMomentum.shape[0], currentMemory.shape[0]);
+      const momentum = prevMomentum.shape[0] > momentumSize
+        ? prevMomentum.slice([0, 0], [momentumSize, -1])
+        : prevMomentum;
+      const memory = currentMemory.shape[0] > momentumSize
+        ? currentMemory.slice([0, 0], [momentumSize, -1])
+        : currentMemory;
+
+      // S_t = eta * S_{t-1} (decay previous momentum)
+      const decayed = momentum.mul(eta);
+
+      // Compute gradient term: (M * k^T * k - v^T * k)
+      // For continuum memory, we approximate with simplified computation
+      const keysT = keys.transpose();
+      const memoryGrad = memory.matMul(keysT).matMul(keys);
+      const valueGrad = values.transpose().matMul(keys);
+      const gradient = memoryGrad.sub(valueGrad);
+
+      // S_t = eta * S_{t-1} - theta * gradient
+      const update = decayed.sub(gradient.mul(learningRate));
+
+      return update as tf.Tensor2D;
+    });
+  }
+
+  /**
+   * HOPE Paper Equation 32: Apply momentum to memory
+   * M_t = diag(1 - alpha_t) * M_t + S_t
+   *
+   * Combines forgetting gate with momentum update
+   */
+  public applyMomentumToMemory(
+    memory: tf.Tensor2D,
+    momentum: tf.Tensor2D,
+    forgettingGate: number
+  ): tf.Tensor2D {
+    return tidyTensor2D(() => {
+      if (momentum.shape[0] === 0 || memory.shape[0] === 0) {
+        return memory;
+      }
+
+      // Ensure dimensions match
+      const size = Math.min(memory.shape[0], momentum.shape[0]);
+      const mem = memory.shape[0] > size ? memory.slice([0, 0], [size, -1]) : memory;
+      const mom = momentum.shape[0] > size ? momentum.slice([0, 0], [size, -1]) : momentum;
+
+      // M_t = (1 - alpha_t) * M_t + S_t
+      const retained = mem.mul(1 - forgettingGate);
+      const updated = retained.add(mom);
+
+      // If original memory was larger, preserve the extra rows
+      if (memory.shape[0] > size) {
+        const remainder = memory.slice([size, 0], [-1, -1]);
+        return tf.concat([updated, remainder], 0) as tf.Tensor2D;
+      }
+
+      return updated as tf.Tensor2D;
+    });
   }
 
   public write(state: HopeMemoryState, embedding: tf.Tensor2D, metadata: MemoryWriteMetadata): HopeMemoryState {
     return tidyMemoryState(() => {
       const normalized = this.normalize(embedding);
-      const newShort = tf.concat<tf.Tensor2D>([state.shortTerm, normalized], 0);
+
+      // HOPE Paper: Compute adaptive forgetting gate
+      const alpha_t = this.updateForgettingGate(metadata.surprise);
+
+      // Apply momentum-based updates if enabled
+      let processedShortTerm = state.shortTerm;
+      let newMomentumState = state.momentumState;
+
+      if (this.config.enableMomentum && state.momentumState && state.shortTerm.shape[0] > 0) {
+        // Compute momentum update (Equation 33)
+        const momentum = this.computeMomentumUpdate(
+          state.momentumState,
+          state.shortTerm,
+          normalized,
+          normalized,
+          this.config.surpriseRetention
+        );
+
+        // Apply momentum with forgetting gate (Equation 32)
+        processedShortTerm = this.applyMomentumToMemory(
+          state.shortTerm,
+          momentum,
+          alpha_t
+        );
+
+        // Update momentum state for next iteration
+        newMomentumState = momentum;
+      } else if (this.config.enableForgettingGate && state.shortTerm.shape[0] > 0) {
+        // Apply forgetting gate without momentum
+        processedShortTerm = state.shortTerm.mul(1 - alpha_t) as tf.Tensor2D;
+      }
+
+      // Add new memory to processed short-term
+      const newShort = tf.concat<tf.Tensor2D>([processedShortTerm, normalized], 0);
+
       const newMeta = tf.concat<tf.Tensor2D>([
         state.meta,
-        tf.tensor2d([[metadata.surprise, metadata.timestamp, 0, 0]], [1, 4])
+        tf.tensor2d([[metadata.surprise, metadata.timestamp, alpha_t, 0]], [1, 4])
       ], 0);
       const newSurpriseHistory = tf.concat<tf.Tensor1D>([state.surpriseHistory, tf.tensor1d([metadata.surprise])], 0);
       const newLevelIndex = tf.concat<tf.Tensor1D>([state.levelIndex, tf.tensor1d([0])], 0);
+
+      // Update momentum state size to match short-term (if enabled)
+      if (this.config.enableMomentum && newMomentumState) {
+        const currentSize = newShort.shape[0];
+        const momentumSize = newMomentumState.shape[0];
+        if (momentumSize < currentSize) {
+          // Expand momentum with zeros for new entries
+          const padding = tf.zeros([currentSize - momentumSize, this.config.memoryDim]);
+          newMomentumState = tf.concat([newMomentumState, padding], 0) as tf.Tensor2D;
+        }
+      }
 
       let updated: HopeMemoryState = {
         ...state,
@@ -94,7 +253,9 @@ export class ContinuumMemory {
         levelIndex: newLevelIndex,
         accessCounts: tf.concat<tf.Tensor1D>([state.accessCounts, tf.tensor1d([0])], 0),
         timestamps: tf.concat<tf.Tensor1D>([state.timestamps, tf.tensor1d([metadata.timestamp])], 0),
-        surpriseBuffer: tf.concat<tf.Tensor1D>([state.surpriseBuffer, tf.tensor1d([metadata.surprise])], 0)
+        surpriseBuffer: tf.concat<tf.Tensor1D>([state.surpriseBuffer, tf.tensor1d([metadata.surprise])], 0),
+        momentumState: newMomentumState,
+        forgettingGate: alpha_t
       };
 
       updated = this.ensureCapacity(updated);
@@ -223,6 +384,8 @@ export class ContinuumMemory {
       surpriseHistory: serializeTensor(state.surpriseHistory),
       levelIndex: serializeTensor(state.levelIndex),
       surpriseBuffer: serializeTensor(state.surpriseBuffer),
+      momentumState: state.momentumState ? serializeTensor(state.momentumState) : [],
+      forgettingGate: state.forgettingGate ?? 0,
       memoryDim: this.config.memoryDim,
       shortTermSlots: this.config.shortTermSlots,
       longTermSlots: this.config.longTermSlots,
@@ -237,6 +400,10 @@ export class ContinuumMemory {
     };
     const toTensor1d = (values: number[]) => tf.tensor1d(values);
     const dim = (data.memoryDim as number) ?? this.config.memoryDim;
+
+    const momentumData = data.momentumState as number[] ?? [];
+    const momentumState = momentumData.length > 0 ? toTensor2d(momentumData, dim) : undefined;
+
     return {
       shortTerm: toTensor2d(data.shortTerm as number[] ?? [], dim),
       longTerm: toTensor2d(data.longTerm as number[] ?? [], dim),
@@ -246,7 +413,9 @@ export class ContinuumMemory {
       accessCounts: toTensor1d(data.accessCounts as number[] ?? []),
       surpriseHistory: toTensor1d(data.surpriseHistory as number[] ?? []),
       levelIndex: toTensor1d(data.levelIndex as number[] ?? []),
-      surpriseBuffer: toTensor1d(data.surpriseBuffer as number[] ?? [])
+      surpriseBuffer: toTensor1d(data.surpriseBuffer as number[] ?? []),
+      momentumState,
+      forgettingGate: (data.forgettingGate as number) ?? 0
     } as HopeMemoryState;
   }
 

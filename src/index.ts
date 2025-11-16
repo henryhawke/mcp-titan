@@ -158,7 +158,11 @@ export class HopeMemoryServer {
       shapes.momentumState = unwrapTensor(this.memoryState.momentumState).shape;
     }
     if (this.memoryState.forgettingGate) {
-      shapes.forgettingGate = unwrapTensor(this.memoryState.forgettingGate).shape;
+      if (typeof this.memoryState.forgettingGate === 'number') {
+        shapes.forgettingGate = [1]; // Scalar value
+      } else {
+        shapes.forgettingGate = unwrapTensor(this.memoryState.forgettingGate).shape;
+      }
     }
     if (this.memoryState.tokenFlowHistory) {
       shapes.tokenFlowHistory = unwrapTensor(this.memoryState.tokenFlowHistory).shape;
@@ -192,8 +196,12 @@ export class HopeMemoryServer {
     if (typeof this.memoryState.momentumDecay === 'number') {
       serialized.momentumDecay = this.memoryState.momentumDecay;
     }
-    if (this.memoryState.forgettingGate) {
-      serialized.forgettingGate = Array.from(unwrapTensor(this.memoryState.forgettingGate).dataSync());
+    if (this.memoryState.forgettingGate !== undefined) {
+      if (typeof this.memoryState.forgettingGate === 'number') {
+        serialized.forgettingGate = [this.memoryState.forgettingGate];
+      } else {
+        serialized.forgettingGate = Array.from(unwrapTensor(this.memoryState.forgettingGate).dataSync());
+      }
     }
     if (this.memoryState.tokenFlowHistory) {
       serialized.tokenFlowHistory = Array.from(unwrapTensor(this.memoryState.tokenFlowHistory).dataSync());
