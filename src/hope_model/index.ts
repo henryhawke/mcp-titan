@@ -37,7 +37,7 @@ const DEFAULT_CONFIG: HopeMemoryConfig = {
   transformerLayers: 6,
   enableMomentum: true,
   enableTokenFlow: true,
-  enableForgettingGate: false,
+  enableForgettingGate: true,
   enableHierarchicalMemory: true,
   useHierarchicalMemory: true
 };
