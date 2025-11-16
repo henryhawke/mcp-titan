@@ -1,74 +1,117 @@
-# HOPE Memory MCP Server Documentation
+# MCP-Titan Documentation Index
 
-Welcome to the HOPE Memory MCP Server documentation! This documentation will help you understand, install, and use the server effectively. Legacy Titan materials are retained for reference; see [architecture-hope.md](architecture-hope.md) for the current implementation details.
+Welcome to the MCP-Titan HOPE Memory Server documentation. This index helps you find the right documentation for your needs.
 
-## Table of Contents
+## Quick Start Documents
 
-### Getting Started
-- [Installation](../README.md#installation)
-- [Quick Start](../README.md#usage)
-- [Features](../README.md#features)
+- **[../README.md](../README.md)** - Main project README with installation, configuration, and quick start
+- **[../CLAUDE.md](../CLAUDE.md)** - Instructions for Claude Code when working with this repository
+- **[api/README.md](api/README.md)** - Complete API reference for all 19 MCP tools
 
-### Guides
-- [Cursor IDE Integration](guides/cursor.md)
-- [Basic Usage Examples](examples/basic-usage.md)
+## Architecture & Design
 
-### API Reference
-- [Server API](api/README.md)
-- [HTTP Endpoints](api/README.md#http-api)
-- [Tool Reference](api/README.md#available-tools)
+- **[architecture-hope.md](architecture-hope.md)** - HOPE architecture overview (Hierarchical Online Persistent Encoding)
+- **[architecture-overview.md](architecture-overview.md)** - Complete system architecture and component relationships
 
-### Development
-- [Contributing Guidelines](../CONTRIBUTING.md)
-- [Development Setup](../CONTRIBUTING.md#development-setup)
-- [Testing](../CONTRIBUTING.md#testing)
+## Implementation Guides
 
-### Additional Resources
-- [GitHub Repository](https://github.com/henryhawke/mcp-titan)
-- [Issue Tracker](https://github.com/henryhawke/mcp-titan/issues)
-- [Model Context Protocol](https://modelcontextprotocol.io)
+- **[../PLAN.md](../PLAN.md)** - 12-phase implementation roadmap (comprehensive)
+- **[../DETAILED_IMPLEMENTATION_GUIDE.md](../DETAILED_IMPLEMENTATION_GUIDE.md)** - Research paper implementation guide (equation-based)
+- **[../SYSTEM_AUDIT.md](../SYSTEM_AUDIT.md)** - Current system audit and status
 
-## Overview
+## Specific Features
 
-The Titan Memory MCP Server is a Model Context Protocol implementation that provides memory-augmented learning capabilities for Cursor IDE. It maintains a persistent memory state that evolves based on interactions, enabling contextual awareness and learning over time.
+- **[pruning-implementation.md](pruning-implementation.md)** - Memory pruning algorithms
+- **[model-improvements.md](model-improvements.md)** - Planned model enhancements
+- **[roadmap.md](roadmap.md)** - Feature roadmap and timeline
 
-### Key Features
+## Development
 
-- 🧠 Automatic memory management
-- 🔄 Real-time updates
-- 📊 Memory state analysis
-- 🔌 Cursor IDE integration
-- 🚀 HTTP API support
-- 💾 Persistent storage
+- **[setup-and-tools-guide.md](setup-and-tools-guide.md)** - Development environment setup
+- **[guides/how-to.md](guides/how-to.md)** - How-to guides for common tasks
+- **[guides/cursor.md](guides/cursor.md)** - Cursor IDE integration
+- **[../CONTRIBUTING.md](../CONTRIBUTING.md)** - Contributing guidelines
 
-### Architecture
+## Reference
+
+- **[code-inventory.md](code-inventory.md)** - Complete codebase inventory
+- **[changelog.md](changelog.md)** - Version history and changes
+- **[llm-system-prompt.md](llm-system-prompt.md)** - System prompt for LLM clients
+
+## Archived Documentation
+
+See [archive/](archive/) for historical documents including:
+- Previous audits and implementation summaries
+- Deprecated API documentation
+- Implementation status snapshots
+
+---
+
+## Key Concepts
+
+### Naming Clarification
+
+- **Package Name:** `@henryhawke/mcp-titan` (for historical/compatibility reasons)
+- **Current Architecture:** HOPE (Hierarchical Online Persistent Encoding)
+- **Legacy Architecture:** TITAN (Training at Test Time with Attention)
+- **Binary:** `titan-memory`
+- **Memory Path:** `~/.hope_memory/`
+
+The package retains the "titan" name for backward compatibility, but the implementation uses the evolved HOPE architecture introduced in 2025.
+
+### Architecture Overview
 
 ```mermaid
 graph TD
-    A[Cursor IDE] -->|MCP| B[HOPE Memory Server]
-    B --> C[Memory State]
-    B --> D[TensorFlow.js]
-    B --> E[HTTP API]
-    C --> F[Persistent Storage]
+    A[MCP Client] -->|stdio| B[HOPE Memory Server]
+    B --> C[HopeMemoryModel]
+    C --> D[Continuum Memory]
+    C --> E[Retentive Core]
+    C --> F[Memory Router]
+    B --> G[LearnerService]
+    D --> H[Persistent Storage]
 ```
-The server automatically saves the memory state every 5 minutes, and it's initialized with zeros when first created. The memory vectors are 768-dimensional by default, which is a common size for language model embeddings.
 
-### Getting Help
+**Key Components:**
+- **Continuum Memory:** 3-tier hierarchical storage (short-term/long-term/archive)
+- **Retentive Core:** Efficient sequence modeling with linear complexity
+- **Memory Router:** Sparse MoE routing for memory operations
+- **LearnerService:** Optional online learning with replay buffer
 
-1. Check the [documentation](api/README.md)
-2. Look through [examples](examples/basic-usage.md)
-3. Search [existing issues](https://github.com/henryhawke/mcp-titan/issues)
-4. Create a new issue if needed
+### Current Status (v3.0.0)
 
-### Contributing
+- ✅ **Complete:** Core HOPE architecture, 19 MCP tools, stdio transport
+- ⚠️ **Partial:** Momentum updates, token flow tracking, forgetting gate
+- 🚧 **Planned:** Deep neural memory, advanced health checks, security hardening
 
-We welcome contributions! Please see our [Contributing Guidelines](../CONTRIBUTING.md) for details on:
+See [../SYSTEM_AUDIT.md](../SYSTEM_AUDIT.md) for detailed status.
 
-- Code style
-- Pull request process
-- Development setup
-- Testing requirements
+## Getting Help
 
-### License
+**For different needs:**
+- **Installation:** [../README.md](../README.md)
+- **API usage:** [api/README.md](api/README.md)
+- **Architecture:** [architecture-hope.md](architecture-hope.md)
+- **Implementation:** [../PLAN.md](../PLAN.md)
+- **Issues/Bugs:** [GitHub Issues](https://github.com/henryhawke/mcp-titan/issues)
 
-This project is licensed under the MIT License - see the [LICENSE](../LICENSE) file for details. 
+## Contributing to Documentation
+
+When updating documentation:
+1. Update this index if adding new major documents
+2. Use correct naming (HOPE for architecture, mcp-titan for package)
+3. Archive outdated docs to `archive/` instead of deleting
+4. Keep tool counts (19) and version numbers (3.0.0) current
+5. Cross-reference related documents with relative links
+
+## External Resources
+
+- [Model Context Protocol](https://modelcontextprotocol.io) - Official MCP documentation
+- [TensorFlow.js](https://www.tensorflow.org/js) - ML framework used
+- [GitHub Repository](https://github.com/henryhawke/mcp-titan) - Source code
+
+---
+
+**Version:** 3.0.0
+**Last Updated:** November 15, 2025
+**Architecture:** HOPE (Hierarchical Online Persistent Encoding)

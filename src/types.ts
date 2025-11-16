@@ -61,6 +61,32 @@ export interface ITensorOps {
   memory(): { numTensors: number; numDataBuffers: number; numBytes: number };
 }
 
+/**
+ * Interface for tokenizer implementations.
+ * Defines the contract for text encoding/decoding with tensor embeddings.
+ */
+export interface ITokenizer {
+  /**
+   * Encodes text into a tensor representation
+   * @param text Input text to encode
+   * @returns Tensor embedding of the text
+   */
+  encode(text: string): ITensor;
+
+  /**
+   * Decodes a tensor back into text
+   * @param tensor Tensor to decode
+   * @returns Decoded text string
+   */
+  decode(tensor: ITensor): string;
+
+  /**
+   * Returns special token IDs used by the tokenizer
+   * @returns Map of special token names to their IDs
+   */
+  getSpecialTokens(): Record<string, number>;
+}
+
 // Memory Configuration Schema
 export const TitanMemoryConfigSchema = z.object({
   inputDim: z.number().int().positive().default(768),
@@ -105,7 +131,17 @@ export const HopeMemoryConfigSchema = z.object({
   dropoutRate: z.number().min(0).max(1).default(0.1),
   promotionThreshold: z.number().min(0).max(1).default(0.05),
   surpriseRetention: z.number().min(0).max(1).default(0.85),
-  routerTopK: z.number().int().positive().max(3).default(2)
+  routerTopK: z.number().int().positive().max(3).default(2),
+
+  // Compatibility and feature flags (for backward compatibility with TITAN-era code)
+  maxSequenceLength: z.number().int().positive().default(512),
+  memorySlots: z.number().int().positive().default(256).describe("Total memory capacity (computed from tiers)"),
+  transformerLayers: z.number().int().positive().default(6).describe("Legacy config (not used in HOPE)"),
+  enableMomentum: z.boolean().default(true).describe("Enable momentum-based memory updates"),
+  enableTokenFlow: z.boolean().default(true).describe("Enable token flow tracking"),
+  enableForgettingGate: z.boolean().default(false).describe("Enable learnable forgetting gate"),
+  enableHierarchicalMemory: z.boolean().default(true).describe("Enable hierarchical memory tiers (always true for HOPE)"),
+  useHierarchicalMemory: z.boolean().default(true).describe("Alias for enableHierarchicalMemory")
 });
 
 export type HopeMemoryConfig = z.infer<typeof HopeMemoryConfigSchema>;
