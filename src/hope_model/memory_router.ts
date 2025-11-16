@@ -82,9 +82,11 @@ export class MemoryRouter {
     const entropy = -weights
       .filter(value => value > 0)
       .reduce((sum, value) => sum + value * Math.log(value), 0);
+    const surpriseValues = Array.from(memory.surpriseHistory.dataSync());
+    const lastSurprise = surpriseValues[surpriseValues.length - 1] ?? 0;
     const novelty = memory.surpriseHistory.shape[0] === 0
       ? 1
-      : Math.max(0.5, 1 + (weights[0] - (memory.surpriseHistory.arraySync().slice(-1)[0] ?? 0)));
+      : Math.max(0.5, 1 + (weights[0] - lastSurprise));
     return entropy * novelty;
   }
 }

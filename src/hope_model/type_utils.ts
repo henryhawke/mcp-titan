@@ -1,5 +1,31 @@
 import * as tf from '@tensorflow/tfjs-node';
 
+type TensorLike = tf.Tensor | tf.Variable<tf.Rank>;
+
+function isTensor(value: unknown): value is TensorLike {
+  return Boolean(value)
+    && typeof value === 'object'
+    && value !== null
+    && 'dtype' in (value as Record<string, unknown>)
+    && typeof (value as tf.Tensor).dataSync === 'function';
+}
+
+function visitTensors(value: unknown, visitor: (tensor: TensorLike) => void): void {
+  if (isTensor(value)) {
+    visitor(value);
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(item => visitTensors(item, visitor));
+    return;
+  }
+
+  if (value && typeof value === 'object') {
+    Object.values(value as Record<string, unknown>).forEach(child => visitTensors(child, visitor));
+  }
+}
+
 /**
  * Type-safe wrapper for tf.tidy that allows custom return types
  * while preserving memory management benefits.
@@ -10,27 +36,11 @@ import * as tf from '@tensorflow/tfjs-node';
  * @param fn Function that returns an object containing tensors
  * @returns The result with all tensors properly managed
  */
-export function tidyMemoryState<T extends Record<string, any>>(
-  fn: () => T
-): T {
+export function tidyMemoryState<T extends object>(fn: () => T): T {
   return tf.tidy(() => {
     const result = fn();
-
-    // Keep all tensor properties so they're not disposed
-    for (const key in result) {
-      const value = result[key];
-      if (value instanceof tf.Tensor) {
-        tf.keep(value);
-      } else if (Array.isArray(value)) {
-        value.forEach(item => {
-          if (item instanceof tf.Tensor) {
-            tf.keep(item);
-          }
-        });
-      }
-    }
-
-    return result;
+    visitTensors(result, tensor => tf.keep(tensor));
+    return result as unknown as tf.TensorContainer;
   }) as T;
 }
 
@@ -88,18 +98,7 @@ export function ensure2D(tensor: tf.Tensor): tf.Tensor2D {
  * @param obj Object containing tensors
  */
 export function disposeTensors(obj: Record<string, any>): void {
-  for (const key in obj) {
-    const value = obj[key];
-    if (value instanceof tf.Tensor) {
-      value.dispose();
-    } else if (Array.isArray(value)) {
-      value.forEach(item => {
-        if (item instanceof tf.Tensor) {
-          item.dispose();
-        }
-      });
-    }
-  }
+  visitTensors(obj, tensor => tensor.dispose());
 }
 
 /**
@@ -109,18 +108,19 @@ export function disposeTensors(obj: Record<string, any>): void {
  * @returns New object with cloned tensors
  */
 export function cloneTensors<T extends Record<string, any>>(obj: T): T {
-  const result: any = {};
-  for (const key in obj) {
-    const value = obj[key];
-    if (value instanceof tf.Tensor) {
-      result[key] = value.clone();
-    } else if (Array.isArray(value)) {
-      result[key] = value.map(item =>
-        item instanceof tf.Tensor ? item.clone() : item
-      );
-    } else {
-      result[key] = value;
+  const cloneValue = (value: unknown): unknown => {
+    if (isTensor(value)) {
+      return value.clone();
     }
-  }
-  return result as T;
+    if (Array.isArray(value)) {
+      return value.map(item => cloneValue(item));
+    }
+    if (value && typeof value === 'object') {
+      const entries = Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, cloneValue(nested)]);
+      return Object.fromEntries(entries);
+    }
+    return value;
+  };
+
+  return cloneValue(obj) as T;
 }

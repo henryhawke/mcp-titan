@@ -9,13 +9,15 @@ import type {
   IAttentionBlock,
   ISurpriseMetrics,
   IModelGradients,
-  HopeMemoryConfig
+  HopeMemoryConfig,
+  SerializedAuxiliaryMemoryState
 } from '../types.js';
 import { ContinuumMemory, type ContinuumMemoryConfig, type HopeMemoryState, type HierarchicalStats } from './continuum_memory.js';
 import { RetentiveCore, type RetentiveCoreConfig, type RetentionState } from './retention_core.js';
 import { SelectiveStateSpace } from './mamba_filters.js';
 import { MemoryRouter, type RoutingDecision } from './memory_router.js';
 import { DeltaCompressionHook, LayerScheduler, UpdateBuffer } from './optimizer_hooks.js';
+import { tidyMemoryState } from './type_utils.js';
 
 const DEFAULT_CONFIG: HopeMemoryConfig = {
   inputDim: 256,
@@ -150,21 +152,21 @@ export class HopeMemoryModel implements IMemoryModel {
     const payload = this.compressionHook.compress(gradientTensors);
     const decompressed = this.compressionHook.decompress(payload);
     const activeLayers = this.layerScheduler.selectActiveLayers(decompressed);
-    const applyGradients: {[key: string]: tf.Tensor} = {};
+    const gradientsToApply: Record<string, tf.Tensor> = {};
 
     gradientEntries.forEach(([name, tensor], index) => {
       if (activeLayers.includes(index)) {
-        applyGradients[name] = tensor;
+        gradientsToApply[name] = tensor;
         this.updateBuffer.push(name, tensor.clone());
       }
     });
 
-    if (Object.keys(applyGradients).length === 0 && gradientEntries.length > 0) {
+    if (Object.keys(gradientsToApply).length === 0 && gradientEntries.length > 0) {
       const [fallbackName, fallbackTensor] = gradientEntries[0];
-      applyGradients[fallbackName] = fallbackTensor;
+      gradientsToApply[fallbackName] = fallbackTensor;
     }
 
-    this.optimizer.applyGradients(applyGradients);
+    this.optimizer.applyGradients(gradientsToApply as any);
 
     const forwardResult = this.computeForward(x_t, hopeState, true);
     this.latestMemoryState = forwardResult.memoryState;
@@ -191,9 +193,11 @@ export class HopeMemoryModel implements IMemoryModel {
   }
 
   public applyGradients?(gradients: Map<string, tf.Tensor>): void {
-    const grads: {[key: string]: tf.Tensor} = {};
-    gradients.forEach((tensor, key) => { grads[key] = tensor; });
-    this.optimizer.applyGradients(grads);
+    const grads: Record<string, tf.Tensor> = {};
+    gradients.forEach((tensor, key) => {
+      grads[key] = tensor;
+    });
+    this.optimizer.applyGradients(grads as any);
   }
 
   public getConfig(): HopeMemoryConfig {
@@ -203,6 +207,7 @@ export class HopeMemoryModel implements IMemoryModel {
   public resetGradients(): void {
     this.compressionHook.reset();
     this.updateBuffer.clear();
+    this.optimizer = tf.train.adam(this.config.learningRate);
   }
 
   public hydrateMemoryState(state: IMemoryState): void {
@@ -238,20 +243,29 @@ export class HopeMemoryModel implements IMemoryModel {
     });
   }
 
-  public exportAuxiliaryState(): Record<string, unknown> {
+  public exportAuxiliaryState(): SerializedAuxiliaryMemoryState | undefined {
     const snapshot = this.updateBuffer.flush();
-    const pending = Array.from(snapshot.entries()).map(([name, tensor]) => {
-      const norm = tensor.norm().arraySync();
+    if (snapshot.size === 0) {
+      return undefined;
+    }
+
+    const tensors: Record<string, { data: number[]; shape: number[] }> = {};
+    snapshot.forEach((tensor, name) => {
+      tensors[name] = {
+        data: Array.from(tensor.dataSync()),
+        shape: tensor.shape as number[]
+      };
       tensor.dispose();
-      return { name, norm };
     });
+
     return {
-      config: this.config,
-      pendingUpdates: pending
+      extendedMemory: {
+        tensors
+      }
     };
   }
 
-  public restoreAuxiliaryState(_: Record<string, unknown>): void {
+  public restoreAuxiliaryState(_: SerializedAuxiliaryMemoryState | undefined): void {
     // No-op for now – HOPE recomputes auxiliary state during initialization.
   }
 
@@ -362,14 +376,14 @@ export class HopeMemoryModel implements IMemoryModel {
   }
 
   private computeForward(input: tf.Tensor2D, memoryState: HopeMemoryState, updateState: boolean): ForwardArtifacts {
-    return tf.tidy(() => {
+    return tidyMemoryState<ForwardArtifacts>(() => {
       const normalizedInput = this.ensure2d(input);
       const readWeights = this.memoryRouter.route(this.retentionState?.hidden ?? normalizedInput, memoryState);
       const memoryRead = this.continuumMemory.read(memoryState, normalizedInput, readWeights.weights);
       const coreInput = tf.concat([normalizedInput, memoryRead], 1);
       const retentionState = this.retentionState ?? this.retentiveCore.initState(1);
       const { outputs, state } = this.retentiveCore.forwardSequence(coreInput, retentionState);
-      const logits = tf.add(tf.matMul(outputs, this.outputKernel), this.outputBias);
+      const logits = tf.add(tf.matMul(outputs, this.outputKernel), this.outputBias) as tf.Tensor2D;
 
       let updatedState = memoryState;
       if (updateState) {
@@ -476,19 +490,6 @@ export class HopeMemoryModel implements IMemoryModel {
       archive: this.latestMemoryState.archive.shape,
       surpriseHistory: this.latestMemoryState.surpriseHistory.shape
     };
-  }
-
-  public getConfig(): HopeMemoryConfig {
-    return { ...this.config };
-  }
-
-  public resetGradients(): void {
-    // Reset optimizer state if needed
-    this.optimizer = tf.train.adam(this.config.learningRate);
-  }
-
-  public createInitialState(): HopeMemoryState {
-    return this.continuumMemory.initialize();
   }
 }
 

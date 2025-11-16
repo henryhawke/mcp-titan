@@ -12,7 +12,7 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version?: string };
 
-import type { IMemoryState, SerializedAuxiliaryMemoryState, ITokenizer } from './types.js';
+import type { IMemoryState, SerializedAuxiliaryMemoryState } from './types.js';
 import { wrapTensor, unwrapTensor } from './types.js';
 import { HopeMemoryModel } from './model.js';
 export { HopeMemoryModel } from './model.js';
@@ -23,6 +23,7 @@ export { LearnerService, type LearnerConfig } from './learner.js';
 import { LearnerService, type LearnerConfig } from './learner.js';
 import { VectorProcessor } from './utils.js';
 import { TfIdfVectorizer } from './tfidf.js';
+import { tidyMemoryState } from './hope_model/type_utils.js';
 import * as path from 'path';
 import { promises as fs } from 'fs';
 import * as crypto from 'crypto';
@@ -78,7 +79,7 @@ export class HopeMemoryServer {
   private vectorProcessor: VectorProcessor;
   private memoryState: IMemoryState;
   private learnerService?: LearnerService;
-  private tokenizer?: ITokenizer;
+  private tokenizer?: AdvancedTokenizer;
   private isInitialized = false;
   private autoSaveInterval?: NodeJS.Timeout;
   private readonly memoryPath: string;
@@ -128,7 +129,7 @@ export class HopeMemoryServer {
       return (this.model as any).createInitialState();
     }
 
-    return tf.tidy(() => {
+    return tidyMemoryState(() => {
       const memoryDim = 256;
       const state: IMemoryState = {
         shortTerm: wrapTensor(tf.tensor2d([], [0, memoryDim])),
@@ -212,7 +213,7 @@ export class HopeMemoryServer {
   private restoreSerializedMemoryState(state: SerializedMemoryState): void {
     const shapes = state.shapes ?? {};
 
-    this.memoryState = tf.tidy(() => {
+    this.memoryState = tidyMemoryState(() => {
       const restored: IMemoryState & { archive?: TensorContainer; levelIndex?: TensorContainer; surpriseBuffer?: TensorContainer } = {
         shortTerm: wrapTensor(tf.tensor2d(state.shortTerm, shapes.shortTerm as [number, number] ?? [state.shortTerm.length, 1])),
         longTerm: wrapTensor(tf.tensor2d(state.longTerm, shapes.longTerm as [number, number] ?? [state.longTerm.length, 1])),
@@ -525,7 +526,7 @@ export class HopeMemoryServer {
 
         try {
           const input = await this.processInput(params.x) as tf.Tensor2D;
-          const result = this.model.forward(wrapTensor(input as tf.Tensor2D), this.memoryState);
+          const result = this.model.forward(input, this.memoryState);
 
           const predicted = Array.from(unwrapTensor(result.predicted).dataSync());
           const memoryUpdate = {
@@ -590,8 +591,8 @@ export class HopeMemoryServer {
           }
 
           const result = this.model.trainStep(
-            wrapTensor(currentInput as tf.Tensor2D),
-            wrapTensor(nextInput as tf.Tensor2D),
+            currentInput,
+            nextInput,
             this.memoryState
           );
 
@@ -1044,7 +1045,7 @@ export class HopeMemoryServer {
             // TODO: Replace with proper AdvancedTokenizer integration
             // Current limitation: AdvancedTokenizer.encode() is async, but ITokenizer requires sync
             // For production use, refactor learner service to be async or pre-initialize tokenizer
-            this.logger.warn('Using fallback tokenizer. For production, integrate AdvancedTokenizer properly.');
+            this.logger.warn('init_learner', 'Using fallback tokenizer. For production, integrate AdvancedTokenizer properly.');
 
             throw new Error(
               'Tokenizer not initialized. The learner service requires a properly initialized tokenizer. ' +
@@ -1590,7 +1591,7 @@ export class HopeMemoryServer {
         // Test operations
         try {
           const testInput = tf.randomNormal([1, this.model?.getConfig().inputDim || 128]) as tf.Tensor2D;
-          const testResult = this.model?.forward(wrapTensor(testInput), this.memoryState);
+          const testResult = this.model?.forward(testInput, this.memoryState);
           testInput.dispose();
           if (testResult) {
             unwrapTensor(testResult.predicted).dispose();
