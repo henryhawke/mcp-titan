@@ -423,4 +423,74 @@ export class HopeMemoryModel implements IMemoryModel {
     }
     return tensor.reshape([tensor.shape[0] ?? 1, this.config.inputDim]);
   }
+
+  // MCP Server compatibility methods
+  public async init_model(config: any): Promise<{ status: string }> {
+    await this.initialize(config);
+    return { status: 'initialized' };
+  }
+
+  public async forward_pass(x: string | number[], memoryState?: IMemoryState): Promise<any> {
+    let inputTensor: tf.Tensor2D;
+    if (typeof x === 'string') {
+      inputTensor = await this.encodeText(x);
+    } else {
+      inputTensor = tf.tensor2d([x]) as tf.Tensor2D;
+    }
+
+    const state = (memoryState as HopeMemoryState) ?? this.latestMemoryState;
+    const result = this.forward(inputTensor, state);
+
+    return {
+      predicted: await result.predicted.array(),
+      memoryState: result.memoryUpdate.newState
+    };
+  }
+
+  public async train_step(x_t: string | number[], x_next: string | number[]): Promise<{ loss: number }> {
+    let inputTensor: tf.Tensor2D;
+    let targetTensor: tf.Tensor2D;
+
+    if (typeof x_t === 'string') {
+      inputTensor = await this.encodeText(x_t);
+    } else {
+      inputTensor = tf.tensor2d([x_t]) as tf.Tensor2D;
+    }
+
+    if (typeof x_next === 'string') {
+      targetTensor = await this.encodeText(x_next);
+    } else {
+      targetTensor = tf.tensor2d([x_next]) as tf.Tensor2D;
+    }
+
+    const result = this.trainStep(inputTensor, targetTensor, this.latestMemoryState);
+    const lossValue = await result.loss.data();
+
+    return { loss: lossValue[0] };
+  }
+
+  public get_memory_state(): any {
+    return {
+      shortTerm: this.latestMemoryState.shortTerm.shape,
+      longTerm: this.latestMemoryState.longTerm.shape,
+      archive: this.latestMemoryState.archive.shape,
+      surpriseHistory: this.latestMemoryState.surpriseHistory.shape
+    };
+  }
+
+  public getConfig(): HopeMemoryConfig {
+    return { ...this.config };
+  }
+
+  public resetGradients(): void {
+    // Reset optimizer state if needed
+    this.optimizer = tf.train.adam(this.config.learningRate);
+  }
+
+  public createInitialState(): HopeMemoryState {
+    return this.continuumMemory.initialize();
+  }
 }
+
+// Export types for external use
+export type { HopeMemoryConfig, HopeMemoryState, HierarchicalStats, RetentionState, RoutingDecision };

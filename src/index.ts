@@ -459,7 +459,6 @@ export class HopeMemoryServer {
             gradientClip: params.gradientClip ?? 1.0,
             enableHierarchicalMemory: true,
             useHierarchicalMemory: true,
-            enableEpisodicSemanticDistinction: true
           };
 
           await this.model.initialize(config);
@@ -525,8 +524,8 @@ export class HopeMemoryServer {
         await this.ensureInitialized();
 
         try {
-          const input = await this.processInput(params.x);
-          const result = this.model.forward(wrapTensor(input), this.memoryState);
+          const input = await this.processInput(params.x) as tf.Tensor2D;
+          const result = this.model.forward(wrapTensor(input as tf.Tensor2D), this.memoryState);
 
           const predicted = Array.from(unwrapTensor(result.predicted).dataSync());
           const memoryUpdate = {
@@ -575,8 +574,8 @@ export class HopeMemoryServer {
         await this.ensureInitialized();
 
         try {
-          const currentInput = await this.processInput(params.x_t);
-          const nextInput = await this.processInput(params.x_next);
+          const currentInput = await this.processInput(params.x_t) as tf.Tensor2D;
+          const nextInput = await this.processInput(params.x_next) as tf.Tensor2D;
 
           // Validate dimensions match
           if (currentInput.shape[0] !== nextInput.shape[0]) {
@@ -591,8 +590,8 @@ export class HopeMemoryServer {
           }
 
           const result = this.model.trainStep(
-            wrapTensor(currentInput),
-            wrapTensor(nextInput),
+            wrapTensor(currentInput as tf.Tensor2D),
+            wrapTensor(nextInput as tf.Tensor2D),
             this.memoryState
           );
 
@@ -1296,7 +1295,7 @@ export class HopeMemoryServer {
     return resolved;
   }
 
-  private async processInput(input: string | number[]): Promise<tf.Tensor1D> {
+  private async processInput(input: string | number[]): Promise<tf.Tensor2D> {
     // Type guard and validation
     if (typeof input === 'string') {
       // Validate string input
@@ -1321,7 +1320,7 @@ export class HopeMemoryServer {
       if (!input.every(x => typeof x === 'number' && !isNaN(x) && isFinite(x))) {
         throw new Error('Input array must contain only valid finite numbers');
       }
-      return tf.tensor1d(input);
+      return tf.tensor2d([input]) as tf.Tensor2D;
     } else {
       throw new Error(`Invalid input type: expected string or number array, got ${typeof input}`);
     }
@@ -1346,7 +1345,6 @@ export class HopeMemoryServer {
           transformerLayers: 6,
           enableHierarchicalMemory: true,
           useHierarchicalMemory: true,
-          enableEpisodicSemanticDistinction: true
         });
 
         // Ensure directory exists and save
@@ -1395,7 +1393,6 @@ export class HopeMemoryServer {
         transformerLayers: 6,
         enableHierarchicalMemory: true,
         useHierarchicalMemory: true,
-        enableEpisodicSemanticDistinction: true
       });
       this.memoryState = this.initializeEmptyState();
       this.syncModelState();
@@ -1539,7 +1536,6 @@ export class HopeMemoryServer {
       health.tensorflow = {
         numTensors: tfMemory.numTensors,
         numBytes: tfMemory.numBytes,
-        numBytesInGPU: tfMemory.numBytesInGPU || 0,
         numDataBuffers: tfMemory.numDataBuffers
       };
 
@@ -1593,7 +1589,7 @@ export class HopeMemoryServer {
 
         // Test operations
         try {
-          const testInput = tf.randomNormal([this.model?.getConfig().inputDim || 128]);
+          const testInput = tf.randomNormal([1, this.model?.getConfig().inputDim || 128]) as tf.Tensor2D;
           const testResult = this.model?.forward(wrapTensor(testInput), this.memoryState);
           testInput.dispose();
           if (testResult) {

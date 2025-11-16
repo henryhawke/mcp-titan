@@ -1,5 +1,6 @@
 import * as tf from '@tensorflow/tfjs-node';
 import type { FilterState, SelectiveStateSpace } from './mamba_filters.js';
+import { tidyMemoryState } from './type_utils.js';
 
 export interface RetentionState {
   hidden: tf.Tensor2D;
@@ -58,17 +59,17 @@ export class RetentiveCore {
   }
 
   public initState(batchSize: number): RetentionState {
-    return tf.tidy(() => ({
-      hidden: tf.zeros([batchSize, this.config.hiddenDim]),
+    return tidyMemoryState(() => ({
+      hidden: tf.zeros([batchSize, this.config.hiddenDim]) as tf.Tensor2D,
       filter: this.selectiveFilter.initState(batchSize),
       steps: 0
     }));
   }
 
   public forwardStep(input: tf.Tensor2D, prevState: RetentionState): SequenceResult {
-    return tf.tidy(() => {
+    return tidyMemoryState(() => {
       const concatenated = tf.concat([input, prevState.hidden], 1);
-      const retentionGate = tf.sigmoid(tf.add(tf.matMul(concatenated, this.gateKernel), this.gateBias));
+      const retentionGate = tf.sigmoid(tf.add(tf.matMul(concatenated, this.gateKernel), this.gateBias)) as tf.Tensor2D;
 
       const projected = tf.add(
         tf.add(tf.matMul(input, this.inputKernel), tf.matMul(prevState.hidden, this.hiddenKernel)),
@@ -76,14 +77,14 @@ export class RetentiveCore {
       );
       const candidate = tf.tanh(projected);
 
-      let hidden = tf.add(tf.mul(retentionGate, prevState.hidden), tf.mul(tf.sub(tf.onesLike(retentionGate), retentionGate), candidate));
+      let hidden = tf.add(tf.mul(retentionGate, prevState.hidden), tf.mul(tf.sub(tf.onesLike(retentionGate), retentionGate), candidate)) as tf.Tensor2D;
       if (this.config.dropoutRate > 0) {
-        hidden = tf.dropout(hidden, this.config.dropoutRate);
+        hidden = tf.dropout(hidden, this.config.dropoutRate) as tf.Tensor2D;
       }
 
       const filterResult = this.selectiveFilter.step(hidden, prevState.filter);
       const filteredHidden = filterResult.output;
-      const output = tf.add(tf.matMul(filteredHidden, this.outputKernel), this.outputBias);
+      const output = tf.add(tf.matMul(filteredHidden, this.outputKernel), this.outputBias) as tf.Tensor2D;
 
       return {
         outputs: output,
@@ -98,15 +99,15 @@ export class RetentiveCore {
   }
 
   public forwardSequence(inputs: tf.Tensor2D, prevState?: RetentionState): SequenceResult {
-    return tf.tidy(() => {
+    return tidyMemoryState(() => {
       const batchSize = inputs.shape[1] ? 1 : inputs.shape[0];
       let state = prevState ?? this.initState(batchSize);
-      const outputs: tf.Tensor[] = [];
-      const gates: tf.Tensor[] = [];
+      const outputs: tf.Tensor2D[] = [];
+      const gates: tf.Tensor2D[] = [];
 
       const timeSteps = inputs.shape[0];
       for (let i = 0; i < timeSteps; i += 1) {
-        const stepInput = inputs.slice([i, 0], [1, inputs.shape[1]]);
+        const stepInput = inputs.slice([i, 0], [1, inputs.shape[1]]) as tf.Tensor2D;
         const { outputs: stepOutput, state: newState, gates: stepGate } = this.forwardStep(stepInput, state);
         outputs.push(stepOutput);
         gates.push(stepGate);
@@ -114,9 +115,9 @@ export class RetentiveCore {
       }
 
       return {
-        outputs: tf.concat(outputs, 0),
+        outputs: tf.concat(outputs, 0) as tf.Tensor2D,
         state,
-        gates: tf.concat(gates, 0)
+        gates: tf.concat(gates, 0) as tf.Tensor2D
       };
     });
   }

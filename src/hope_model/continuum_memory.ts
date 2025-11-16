@@ -1,5 +1,6 @@
 import * as tf from '@tensorflow/tfjs-node';
 import type { IMemoryState } from '../types.js';
+import { tidyMemoryState, tidyTensor2D } from './type_utils.js';
 
 export interface ContinuumMemoryConfig {
   memoryDim: number;
@@ -39,43 +40,43 @@ export class ContinuumMemory {
   }
 
   public initialize(): HopeMemoryState {
-    return tf.tidy(() => ({
-      shortTerm: tf.tensor2d([], [0, this.config.memoryDim]),
-      longTerm: tf.tensor2d([], [0, this.config.memoryDim]),
-      archive: tf.tensor2d([], [0, this.config.memoryDim]),
-      meta: tf.tensor2d([], [0, 4]),
-      timestamps: tf.tensor1d([]),
-      accessCounts: tf.tensor1d([]),
-      surpriseHistory: tf.tensor1d([]),
-      levelIndex: tf.tensor1d([]),
-      surpriseBuffer: tf.tensor1d([])
+    return tidyMemoryState(() => ({
+      shortTerm: tf.tensor2d([], [0, this.config.memoryDim]) as tf.Tensor2D,
+      longTerm: tf.tensor2d([], [0, this.config.memoryDim]) as tf.Tensor2D,
+      archive: tf.tensor2d([], [0, this.config.memoryDim]) as tf.Tensor2D,
+      meta: tf.tensor2d([], [0, 4]) as tf.Tensor2D,
+      timestamps: tf.tensor1d([]) as tf.Tensor1D,
+      accessCounts: tf.tensor1d([]) as tf.Tensor1D,
+      surpriseHistory: tf.tensor1d([]) as tf.Tensor1D,
+      levelIndex: tf.tensor1d([]) as tf.Tensor1D,
+      surpriseBuffer: tf.tensor1d([]) as tf.Tensor1D
     }));
   }
 
   public clone(state: HopeMemoryState): HopeMemoryState {
-    return tf.tidy(() => ({
-      shortTerm: state.shortTerm.clone(),
-      longTerm: state.longTerm.clone(),
-      archive: state.archive.clone(),
-      meta: state.meta.clone(),
-      timestamps: state.timestamps.clone(),
-      accessCounts: state.accessCounts.clone(),
-      surpriseHistory: state.surpriseHistory.clone(),
-      levelIndex: state.levelIndex.clone(),
-      surpriseBuffer: state.surpriseBuffer.clone()
+    return tidyMemoryState(() => ({
+      shortTerm: state.shortTerm.clone() as tf.Tensor2D,
+      longTerm: state.longTerm.clone() as tf.Tensor2D,
+      archive: state.archive.clone() as tf.Tensor2D,
+      meta: state.meta.clone() as tf.Tensor2D,
+      timestamps: state.timestamps.clone() as tf.Tensor1D,
+      accessCounts: state.accessCounts.clone() as tf.Tensor1D,
+      surpriseHistory: state.surpriseHistory.clone() as tf.Tensor1D,
+      levelIndex: state.levelIndex.clone() as tf.Tensor1D,
+      surpriseBuffer: state.surpriseBuffer.clone() as tf.Tensor1D
     }));
   }
 
   public write(state: HopeMemoryState, embedding: tf.Tensor2D, metadata: MemoryWriteMetadata): HopeMemoryState {
-    return tf.tidy(() => {
+    return tidyMemoryState(() => {
       const normalized = this.normalize(embedding);
-      const newShort = tf.concat([state.shortTerm, normalized], 0);
+      const newShort = tf.concat([state.shortTerm, normalized], 0) as tf.Tensor2D;
       const newMeta = tf.concat([
         state.meta,
         tf.tensor2d([[metadata.surprise, metadata.timestamp, 0, 0]])
-      ], 0);
-      const newSurpriseHistory = tf.concat([state.surpriseHistory, tf.tensor1d([metadata.surprise])], 0);
-      const newLevelIndex = tf.concat([state.levelIndex, tf.tensor1d([0])], 0);
+      ], 0) as tf.Tensor2D;
+      const newSurpriseHistory = tf.concat([state.surpriseHistory, tf.tensor1d([metadata.surprise])], 0) as tf.Tensor1D;
+      const newLevelIndex = tf.concat([state.levelIndex, tf.tensor1d([0])], 0) as tf.Tensor1D;
 
       let updated: HopeMemoryState = {
         ...state,
@@ -83,9 +84,9 @@ export class ContinuumMemory {
         meta: newMeta,
         surpriseHistory: newSurpriseHistory,
         levelIndex: newLevelIndex,
-        accessCounts: tf.concat([state.accessCounts, tf.tensor1d([0])], 0),
-        timestamps: tf.concat([state.timestamps, tf.tensor1d([metadata.timestamp])], 0),
-        surpriseBuffer: tf.concat([state.surpriseBuffer, tf.tensor1d([metadata.surprise])], 0)
+        accessCounts: tf.concat([state.accessCounts, tf.tensor1d([0])], 0) as tf.Tensor1D,
+        timestamps: tf.concat([state.timestamps, tf.tensor1d([metadata.timestamp])], 0) as tf.Tensor1D,
+        surpriseBuffer: tf.concat([state.surpriseBuffer, tf.tensor1d([metadata.surprise])], 0) as tf.Tensor1D
       };
 
       updated = this.ensureCapacity(updated);
@@ -94,10 +95,10 @@ export class ContinuumMemory {
   }
 
   public read(state: HopeMemoryState, query: tf.Tensor2D, weights: tf.Tensor2D): tf.Tensor2D {
-    return tf.tidy(() => {
+    return tidyTensor2D(() => {
       const normalizedQuery = this.normalize(query);
 
-      const reads: tf.Tensor[] = [];
+      const reads: tf.Tensor2D[] = [];
       const segments: Array<{ tensor: tf.Tensor2D; weight: tf.Tensor }>
         = [
           { tensor: state.shortTerm, weight: weights.slice([0, 0], [1, 1]) },
@@ -107,50 +108,50 @@ export class ContinuumMemory {
 
       segments.forEach(({ tensor, weight }) => {
         if (tensor.shape[0] === 0) {
-          reads.push(tf.zerosLike(normalizedQuery));
+          reads.push(tf.zerosLike(normalizedQuery) as tf.Tensor2D);
           return;
         }
         const similarities = tf.matMul(normalizedQuery, tensor, false, true);
         const attention = tf.softmax(similarities, 1);
         const context = tf.matMul(attention, tensor);
-        reads.push(tf.mul(context, weight));
+        reads.push(tf.mul(context, weight) as tf.Tensor2D);
       });
 
-      return reads.reduce((acc, current) => tf.add(acc, current));
+      return reads.reduce((acc, current) => tf.add(acc, current) as tf.Tensor2D);
     });
   }
 
   public promote(state: HopeMemoryState): HopeMemoryState {
-    return tf.tidy(() => {
+    return tidyMemoryState(() => {
       let updated = state;
       const overflow = state.shortTerm.shape[0] - this.config.shortTermSlots;
       if (overflow > 0) {
-        const promoteSlice = state.shortTerm.slice([0, 0], [overflow, -1]);
-        const remainingShort = state.shortTerm.slice([overflow, 0], [-1, -1]);
+        const promoteSlice = state.shortTerm.slice([0, 0], [overflow, -1]) as tf.Tensor2D;
+        const remainingShort = state.shortTerm.slice([overflow, 0], [-1, -1]) as tf.Tensor2D;
 
         updated = {
           ...updated,
           shortTerm: remainingShort,
-          longTerm: tf.concat([state.longTerm, promoteSlice], 0),
-          meta: tf.concat([state.meta.slice([overflow, 0], [-1, -1]), tf.tensor2d(Array(overflow).fill([0, 0, 0, 0]))], 0),
-          levelIndex: tf.concat([state.levelIndex.slice([overflow], [-1]), tf.tensor1d(Array(overflow).fill(1))], 0)
+          longTerm: tf.concat([state.longTerm, promoteSlice], 0) as tf.Tensor2D,
+          meta: tf.concat([state.meta.slice([overflow, 0], [-1, -1]), tf.tensor2d(Array(overflow).fill([0, 0, 0, 0]))], 0) as tf.Tensor2D,
+          levelIndex: tf.concat([state.levelIndex.slice([overflow], [-1]), tf.tensor1d(Array(overflow).fill(1))], 0) as tf.Tensor1D
         } as HopeMemoryState;
       }
 
       const longOverflow = updated.longTerm.shape[0] - this.config.longTermSlots;
       if (longOverflow > 0) {
-        const archiveSlice = updated.longTerm.slice([0, 0], [longOverflow, -1]);
-        const remainingLong = updated.longTerm.slice([longOverflow, 0], [-1, -1]);
+        const archiveSlice = updated.longTerm.slice([0, 0], [longOverflow, -1]) as tf.Tensor2D;
+        const remainingLong = updated.longTerm.slice([longOverflow, 0], [-1, -1]) as tf.Tensor2D;
         updated = {
           ...updated,
           longTerm: remainingLong,
-          archive: tf.concat([updated.archive, archiveSlice], 0)
+          archive: tf.concat([updated.archive, archiveSlice], 0) as tf.Tensor2D
         } as HopeMemoryState;
       }
 
       const archiveOverflow = updated.archive.shape[0] - this.config.archiveSlots;
       if (archiveOverflow > 0) {
-        const trimmedArchive = updated.archive.slice([archiveOverflow, 0], [-1, -1]);
+        const trimmedArchive = updated.archive.slice([archiveOverflow, 0], [-1, -1]) as tf.Tensor2D;
         updated = { ...updated, archive: trimmedArchive } as HopeMemoryState;
       }
 
@@ -159,12 +160,12 @@ export class ContinuumMemory {
   }
 
   public prune(state: HopeMemoryState, threshold: number): HopeMemoryState {
-    return tf.tidy(() => {
+    return tidyMemoryState(() => {
       if (state.longTerm.shape[0] === 0) { return state; }
       const magnitudes = tf.mean(tf.abs(state.longTerm), 1);
       const mask = tf.greaterEqual(magnitudes, tf.scalar(threshold));
-      const indices = tf.where(mask).reshape([-1]);
-      const pruned = tf.gather(state.longTerm, indices);
+      const indices = tf.where(mask).reshape([-1]) as tf.Tensor1D;
+      const pruned = tf.gather(state.longTerm, indices) as tf.Tensor2D;
       return {
         ...state,
         longTerm: pruned
