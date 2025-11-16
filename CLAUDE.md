@@ -9,23 +9,23 @@ This is **mcp-titan**, a sophisticated neural memory system for LLMs that provid
 ## Development Commands
 
 ### Core Commands
-- `npm run build` - Compile TypeScript to JavaScript
-- `npm run typecheck` - Type check without emitting files  
-- `npm run lint` - Run ESLint with zero warnings policy
-- `npm run lint:fix` - Auto-fix ESLint issues
-- `npm run test` - Run Jest tests with experimental VM modules
-- `npm run clean` - Remove build artifacts
+- `bun run build` - Compile TypeScript to JavaScript
+- `bun run typecheck` - Type check without emitting files  
+- `bun run lint` - Run ESLint with zero warnings policy
+- `bun run lint:fix` - Auto-fix ESLint issues
+- `bun test` - Run Jest tests with experimental VM modules
+- `bun run clean` - Remove build artifacts
 
 ### Model Training Commands
-- `npm run train-model` - Train the model with default settings
-- `npm run train-quick` - Quick training for development
-- `npm run train-production` - Full production training
-- `npm run download-data` - Download training datasets
-- `npm run test-model` - Test model functionality
+- `bun run train-model` - Train the model with default settings
+- `bun run train-quick` - Quick training for development
+- `bun run train-production` - Full production training
+- `bun run download-data` - Download training datasets
+- `bun run test-model` - Test model functionality
 
 ### Server Commands
-- `npm start` - Start the MCP server (production)
-- `npm run dev` - Development mode with auto-restart
+- `bun start` - Start the MCP server (production)
+- `bun --watch src/index.ts` - Development mode with auto-restart
 
 ## Architecture Overview
 
@@ -68,7 +68,7 @@ The server is designed to work with Cursor and other MCP-compatible clients. Con
 ```json
 {
   "titan-memory": {
-    "command": "node",
+    "command": "bun",
     "args": ["index.js"], 
     "cwd": "/path/to/mcp-titan"
   }
@@ -90,7 +90,7 @@ Tests are in `src/__tests__/` and cover:
 - Server tool integration
 - Tokenizer capabilities
 
-Run `npm test` to execute the full test suite.
+Run `bun test` to execute the full test suite.
 
 ## Important Notes
 

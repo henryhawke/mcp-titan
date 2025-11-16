@@ -92,7 +92,7 @@
 ### 1.2 Test Infrastructure Audit
 
 - Read all files in src/**tests**/ to understand current coverage
-- Run npm test to capture baseline pass/fail state
+- Run bun test to capture baseline pass/fail state
 - **Gaps Identified:**
   - No integration tests for end-to-end MCP tool invocation
   - No multi-step workflow tests (init → train → save → load → predict)
@@ -218,7 +218,7 @@
 - Update DETAILED_IMPLEMENTATION_GUIDE.md Section 1 with "✅ IMPLEMENTED" marker
 - Update IMPLEMENTATION_PROGRESS.md: mark Phase 2 complete with date
 - Update docs/api/README.md with new get_memory_state fields
-- Run full test suite: npm test
+- Run full test suite: bun test
 - Manually test: init_model → train_step (5x) → get_memory_state, verify momentum present
 - Commit with message: "feat: implement Titans momentum and forgetting (Eqs 32-33)"
 - **Update this plan document with Phase 2 completion date**
@@ -888,7 +888,7 @@
 - Update package.json version to 4.0.0
 - Verify package.json metadata (author, license, keywords)
 - Update .npmignore to exclude test files and docs
-- Test package locally: npm pack, install from tarball
+- Test package locally: bun pack, install from tarball
 - Verify binary works: npx titan-memory --help
 - Document publish steps in CONTRIBUTING.md
 - **Memory:** Publish to @henryhawke/mcp-titan (not mcp-titan alone)
@@ -904,7 +904,7 @@
 - [ ] Performance benchmarks meet targets (<100ms 95th percentile)
 - [ ] Security audit passed (OWASP top 10)
 - [ ] Backward compatibility maintained (or documented)
-- [ ] npm publish dry-run succeeds
+- [ ] bun publish dry-run succeeds
 - [ ] All phases marked complete in IMPLEMENTATION_PROGRESS.md
 - [ ] This plan document updated with all completion dates
 
@@ -914,7 +914,7 @@
 - Create git tag: v4.0.0
 - Push tag to origin
 - Create GitHub release with release notes
-- Publish to npm: npm publish --scope @henryhawke
+- Publish to npm: bun publish --scope @henryhawke
 - Announce release
 
 ---
@@ -1036,7 +1036,7 @@ After completing all phases, the MCP server MUST have:
 - [ ] phase1-2: Map src/model.ts implementations vs stubs (note lines 1800-2000, 251-276, 2890+)
 - [ ] phase1-3: Catalog src/types.ts IMemoryState fields and missing Titans fields
 - [ ] phase1-4: Understand src/learner.ts replay buffer, note mock tokenizer at src/index.ts:706
-- [ ] phase1-5: Run npm test, capture baseline pass/fail, identify gaps
+- [ ] phase1-5: Run bun test, capture baseline pass/fail, identify gaps
 - [ ] phase1-6: Document test gaps and edge cases in IMPLEMENTATION_PROGRESS.md
 - [ ] phase1-7: Verify package.json dependencies, check TypeScript config
 - [ ] phase1-8: Update this plan with Phase 1 completion date
