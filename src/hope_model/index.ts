@@ -1,6 +1,7 @@
 import * as tf from '@tensorflow/tfjs-node';
 import { promises as fs } from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 import type {
   IMemoryModel,
@@ -12,6 +13,7 @@ import type {
   HopeMemoryConfig,
   SerializedAuxiliaryMemoryState
 } from '../types.js';
+import { AdvancedTokenizer } from '../tokenizer/index.js';
 import { ContinuumMemory, type ContinuumMemoryConfig, type HopeMemoryState, type HierarchicalStats } from './continuum_memory.js';
 import { RetentiveCore, type RetentiveCoreConfig, type RetentionState } from './retention_core.js';
 import { SelectiveStateSpace } from './mamba_filters.js';
@@ -62,81 +64,31 @@ export interface TokenFlowState {
 
 export class HopeMemoryModel implements IMemoryModel {
   private config: HopeMemoryConfig;
-  private readonly continuumMemory: ContinuumMemory;
-  private readonly selectiveFilter: SelectiveStateSpace;
-  private readonly retentiveCore: RetentiveCore;
-  private readonly memoryRouter: MemoryRouter;
-  private readonly compressionHook: DeltaCompressionHook;
-  private readonly layerScheduler: LayerScheduler;
-  private readonly updateBuffer: UpdateBuffer;
-  private readonly outputKernel: tf.Variable<tf.Rank.R2>;
-  private readonly outputBias: tf.Variable<tf.Rank.R1>;
+  private continuumMemory: ContinuumMemory;
+  private selectiveFilter: SelectiveStateSpace;
+  private retentiveCore: RetentiveCore;
+  private memoryRouter: MemoryRouter;
+  private compressionHook: DeltaCompressionHook;
+  private layerScheduler: LayerScheduler;
+  private updateBuffer: UpdateBuffer;
+  private outputKernel: tf.Variable<tf.Rank.R2>;
+  private outputBias: tf.Variable<tf.Rank.R1>;
   private optimizer: tf.AdamOptimizer;
   private retentionState?: RetentionState;
   private latestMemoryState: HopeMemoryState;
   private tokenFlowState: TokenFlowState;
+  private tokenizer?: AdvancedTokenizer;
 
   constructor(config: Partial<HopeMemoryConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
-
-    const memoryConfig: ContinuumMemoryConfig = {
-      memoryDim: this.config.memoryDim,
-      shortTermSlots: this.config.shortTermSlots,
-      longTermSlots: this.config.longTermSlots,
-      archiveSlots: this.config.archiveSlots,
-      promotionThreshold: this.config.promotionThreshold,
-      surpriseRetention: this.config.surpriseRetention,
-      // HOPE paper features
-      momentumDecay: 0.9,
-      enableMomentum: this.config.enableMomentum ?? true,
-      enableForgettingGate: this.config.enableForgettingGate ?? true,
-      baseForgettingRate: 0.1,
-      surpriseForgettingWeight: 0.3
-    };
-    this.continuumMemory = new ContinuumMemory(memoryConfig);
-
-    const filter = new SelectiveStateSpace({
-      hiddenDim: this.config.hiddenDim,
-      contextDim: this.config.hiddenDim,
-      dropoutRate: this.config.dropoutRate
-    });
-    this.selectiveFilter = filter;
-    const coreConfig: RetentiveCoreConfig = {
-      inputDim: this.config.inputDim + this.config.memoryDim,
-      hiddenDim: this.config.hiddenDim,
-      dropoutRate: this.config.dropoutRate,
-      chunkSize: 64
-    };
-    this.retentiveCore = new RetentiveCore(coreConfig, filter);
-    this.memoryRouter = new MemoryRouter({
-      hiddenDim: this.config.hiddenDim,
-      numExperts: 3,
-      topK: this.config.routerTopK
-    });
-    this.compressionHook = new DeltaCompressionHook();
-    this.layerScheduler = new LayerScheduler({ maxActiveLayers: 4 });
-    this.updateBuffer = new UpdateBuffer();
-
-    this.outputKernel = tf.variable(tf.randomNormal([this.config.hiddenDim, this.config.inputDim]));
-    this.outputBias = tf.variable(tf.zeros([this.config.inputDim]));
-    this.optimizer = tf.train.adam(this.config.learningRate);
-    this.retentionState = this.retentiveCore.initState(1);
-    this.latestMemoryState = this.continuumMemory.initialize();
-    this.tokenFlowState = {
-      history: [],
-      weights: [],
-      windowSize: 32,
-      decay: 0.95
-    };
+    this.buildComponents();
   }
 
   public async initialize(config?: Partial<HopeMemoryConfig>): Promise<void> {
     if (config) {
       this.config = { ...this.config, ...config };
     }
-    this.optimizer = tf.train.adam(this.config.learningRate);
-    this.retentionState = this.retentiveCore.initState(1);
-    this.latestMemoryState = this.continuumMemory.initialize();
+    this.buildComponents();
   }
 
   public createInitialState(): HopeMemoryState {
@@ -234,6 +186,14 @@ export class HopeMemoryModel implements IMemoryModel {
     this.optimizer = tf.train.adam(this.config.learningRate);
   }
 
+  /**
+   * Attach a tokenizer for higher-quality text embeddings.
+   * Tokenizer embeddings are pooled and adapted to model inputDim.
+   */
+  public attachTokenizer(tokenizer: AdvancedTokenizer): void {
+    this.tokenizer = tokenizer;
+  }
+
   public hydrateMemoryState(state: IMemoryState): void {
     this.latestMemoryState = state as HopeMemoryState;
   }
@@ -248,12 +208,93 @@ export class HopeMemoryModel implements IMemoryModel {
   }
 
   public async encodeText(text: string): Promise<tf.Tensor2D> {
-    const tokens = Array.from(text).map(char => char.codePointAt(0) ?? 0);
-    const normalized = new Array(this.config.inputDim).fill(0);
-    for (let i = 0; i < Math.min(tokens.length, this.config.inputDim); i += 1) {
-      normalized[i] = (tokens[i] % 1024) / 1024;
+    const cleaned = text.trim().slice(0, 4096);
+
+    // Prefer the advanced tokenizer when available
+    if (this.tokenizer) {
+      try {
+        const result = await this.tokenizer.encode(cleaned, {
+          maxLength: this.config.maxSequenceLength,
+          padding: true,
+          truncation: true,
+          addSpecialTokens: true,
+          returnTensors: true
+        });
+
+        const embeddings = result.embeddings as tf.Tensor2D;
+        const pooled = tf.tidy(() => embeddings.mean(0));
+
+        // Dispose tokenizer-attached tensors we no longer need
+        embeddings.dispose();
+        if ((result as any).attentionMask && typeof (result as any).attentionMask.dispose === 'function') {
+          (result as any).attentionMask.dispose();
+        }
+
+        const adjusted = tf.tidy(() => {
+          const targetDim = this.config.inputDim;
+          const pooled1d = pooled as tf.Tensor1D;
+
+          if (pooled1d.shape[0] === targetDim) {
+            return pooled1d.expandDims(0) as tf.Tensor2D;
+          }
+
+          if (pooled1d.shape[0] > targetDim) {
+            const sliced = pooled1d.slice([0], [targetDim]);
+            return sliced.expandDims(0) as tf.Tensor2D;
+          }
+
+          const padAmount = targetDim - pooled1d.shape[0];
+          const padded = tf.concat([pooled1d, tf.zeros([padAmount])]) as tf.Tensor1D;
+          return padded.expandDims(0) as tf.Tensor2D;
+        });
+
+        pooled.dispose();
+        return adjusted;
+      } catch (error) {
+        // Fallback to hashed encoding below
+        console.warn('Tokenizer encode failed, falling back to hashed encoding:', error);
+      }
     }
-    return tf.tensor2d([normalized]);
+
+    // Fallback: hashed bag-of-tokens mapped into inputDim with L2 normalization
+    const tokens = cleaned
+      .toLowerCase()
+      .split(/[^a-z0-9]+/i)
+      .filter(Boolean)
+      .slice(0, this.config.inputDim * 4); // cap to avoid huge loops
+
+    const vec = new Float32Array(this.config.inputDim).fill(0);
+    const spreadsPerToken = 4;
+
+    if (tokens.length === 0) {
+      // Fallback to simple char codes if no tokens extracted
+      const chars = Array.from(cleaned).map(c => c.codePointAt(0) ?? 0);
+      for (let i = 0; i < Math.min(chars.length, vec.length); i += 1) {
+        vec[i] = (chars[i] % 1024) / 1024;
+      }
+    } else {
+      for (const tok of tokens) {
+        const digest = crypto.createHash('sha256').update(tok).digest();
+        for (let i = 0; i < spreadsPerToken; i += 1) {
+          const offset = (i * 4) % digest.length;
+          const idx = digest.readUInt32BE(offset) % this.config.inputDim;
+          vec[idx] += 1;
+        }
+      }
+    }
+
+    // L2 normalize to keep scale stable
+    let norm = 0;
+    for (let i = 0; i < vec.length; i += 1) {
+      norm += vec[i] * vec[i];
+    }
+    norm = Math.sqrt(norm) || 1;
+    for (let i = 0; i < vec.length; i += 1) {
+      vec[i] = vec[i] / norm;
+    }
+
+    return tf.tensor2d([Array.from(vec)], [1, this.config.inputDim]);
+>>>>>>> c8bd898 (Sure! Pl)
   }
 
   public async storeMemory(text: string): Promise<void> {
@@ -309,6 +350,7 @@ export class HopeMemoryModel implements IMemoryModel {
       shapes: number[][];
     };
     this.config = { ...this.config, ...payload.config };
+    this.buildComponents();
     const variables = this.getTrainableVariables();
     payload.weights.forEach((values, index) => {
       const shape = payload.shapes[index];
@@ -604,6 +646,77 @@ export class HopeMemoryModel implements IMemoryModel {
       archive: this.latestMemoryState.archive.shape,
       surpriseHistory: this.latestMemoryState.surpriseHistory.shape
     };
+  }
+
+  /**
+   * Rebuild model components to reflect the current configuration.
+   * Used during initialization and when loading checkpoints/configs.
+   */
+  private buildComponents(): void {
+    this.disposeTrainables();
+
+    const memoryConfig: ContinuumMemoryConfig = {
+      memoryDim: this.config.memoryDim,
+      shortTermSlots: this.config.shortTermSlots,
+      longTermSlots: this.config.longTermSlots,
+      archiveSlots: this.config.archiveSlots,
+      promotionThreshold: this.config.promotionThreshold,
+      surpriseRetention: this.config.surpriseRetention,
+      momentumDecay: 0.9,
+      enableMomentum: this.config.enableMomentum ?? true,
+      enableForgettingGate: this.config.enableForgettingGate ?? true,
+      baseForgettingRate: 0.1,
+      surpriseForgettingWeight: 0.3
+    };
+    this.continuumMemory = new ContinuumMemory(memoryConfig);
+
+    this.selectiveFilter = new SelectiveStateSpace({
+      hiddenDim: this.config.hiddenDim,
+      contextDim: this.config.hiddenDim,
+      dropoutRate: this.config.dropoutRate
+    });
+    const coreConfig: RetentiveCoreConfig = {
+      inputDim: this.config.inputDim + this.config.memoryDim,
+      hiddenDim: this.config.hiddenDim,
+      dropoutRate: this.config.dropoutRate,
+      chunkSize: 64
+    };
+    this.retentiveCore = new RetentiveCore(coreConfig, this.selectiveFilter);
+    this.memoryRouter = new MemoryRouter({
+      hiddenDim: this.config.hiddenDim,
+      numExperts: 3,
+      topK: this.config.routerTopK
+    });
+    this.compressionHook = new DeltaCompressionHook();
+    this.layerScheduler = new LayerScheduler({ maxActiveLayers: 4 });
+    this.updateBuffer = new UpdateBuffer();
+
+    this.outputKernel = tf.variable(tf.randomNormal([this.config.hiddenDim, this.config.inputDim]));
+    this.outputBias = tf.variable(tf.zeros([this.config.inputDim]));
+    this.optimizer = tf.train.adam(this.config.learningRate);
+    this.retentionState = this.retentiveCore.initState(1);
+    this.latestMemoryState = this.continuumMemory.initialize();
+    this.tokenFlowState = {
+      history: [],
+      weights: [],
+      windowSize: 32,
+      decay: 0.95
+    };
+  }
+
+  private disposeTrainables(): void {
+    try {
+      this.outputKernel?.dispose();
+      this.outputBias?.dispose();
+      if (this.retentionState?.hidden) {
+        tf.dispose(this.retentionState.hidden);
+      }
+      if (this.retentionState?.cell) {
+        tf.dispose(this.retentionState.cell);
+      }
+    } catch {
+      // best-effort cleanup
+    }
   }
 }
 

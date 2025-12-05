@@ -87,6 +87,28 @@ export class HopeMemoryServer {
   private logger: StructuredLogger;
   private readonly toolDescriptions = new Map<string, string>();
 
+  private async attachTokenizerToModel(): Promise<void> {
+    if (this.model && this.tokenizer) {
+      this.model.attachTokenizer(this.tokenizer);
+    }
+  }
+
+  private async ensureTokenizer(): Promise<void> {
+    if (this.tokenizer) { return; }
+
+    const config = {
+      embeddingDim: this.model?.getConfig().inputDim ?? 256,
+      maxSequenceLength: this.model?.getConfig().maxSequenceLength ?? 512,
+      useLegacyCharMode: true,
+      vocabSize: 2048,
+      enableBootstrapping: true
+    };
+
+    this.tokenizer = new AdvancedTokenizer(config);
+    await this.tokenizer.initialize();
+    await this.attachTokenizerToModel();
+  }
+
   constructor(options: { memoryPath?: string } = {}) {
     this.server = new McpServer({
       name: "HOPE Memory",
@@ -471,6 +493,7 @@ export class HopeMemoryServer {
           };
 
           await this.model.initialize(config);
+          await this.attachTokenizerToModel();
           this.memoryState = this.initializeEmptyState();
           this.syncModelState();
           this.isInitialized = true;
@@ -549,7 +572,6 @@ export class HopeMemoryServer {
           // Update memory state
           this.memoryState = result.memoryUpdate.newState;
           this.syncModelState();
-          this.syncModelState();
 
           input.dispose();
 
@@ -557,6 +579,12 @@ export class HopeMemoryServer {
             content: [{
               type: "text",
               text: `Forward pass completed. Predicted: [${predicted.slice(0, 10).map(x => x.toFixed(4)).join(', ')}${predicted.length > 10 ? '...' : ''}]`
+            }, {
+              type: "data" as const,
+              data: {
+                predicted,
+                memoryUpdate
+              }
             }]
           };
         } catch (error) {
@@ -615,6 +643,17 @@ export class HopeMemoryServer {
             content: [{
               type: "text",
               text: `Training step completed. Loss: ${loss.toFixed(6)}`
+            }, {
+              type: "data" as const,
+              data: {
+                loss,
+                memoryState: {
+                  shortTerm: unwrapTensor(this.memoryState.shortTerm).shape,
+                  longTerm: unwrapTensor(this.memoryState.longTerm).shape,
+                  meta: unwrapTensor(this.memoryState.meta).shape,
+                  surpriseHistory: unwrapTensor(this.memoryState.surpriseHistory).shape
+                }
+              }
             }]
           };
         } catch (error) {
@@ -1259,6 +1298,9 @@ export class HopeMemoryServer {
             content: [{
               type: "text",
               text: `Training sample added successfully. Buffer size: ${stats.bufferSize}`
+            }, {
+              type: "data" as const,
+              data: stats
             }]
           };
         } catch (error) {
@@ -1274,6 +1316,41 @@ export class HopeMemoryServer {
             tensor.dispose();
           }
         }
+      }
+    );
+
+    // Initialize tokenizer tool
+    this.registerToolDefinition(
+      'init_tokenizer',
+      "Initialize the AdvancedTokenizer and bind it to the model/learner pipeline",
+      z.object({
+        vocabSize: z.number().int().positive().optional().describe("Tokenizer vocabulary size"),
+        embeddingDim: z.number().int().positive().optional().describe("Embedding dimension (defaults to model inputDim)"),
+        maxSequenceLength: z.number().int().positive().optional().describe("Maximum sequence length"),
+        useLegacyCharMode: z.boolean().optional().describe("Use legacy character tokenizer mode")
+      }),
+      async (params) => {
+        await this.ensureInitialized();
+        const modelConfig = this.model.getConfig();
+
+        const tokenizerConfig = {
+          vocabSize: params.vocabSize ?? 32000,
+          embeddingDim: params.embeddingDim ?? modelConfig.inputDim,
+          maxSequenceLength: params.maxSequenceLength ?? modelConfig.maxSequenceLength,
+          useLegacyCharMode: params.useLegacyCharMode ?? false,
+          enableBootstrapping: true
+        };
+
+        this.tokenizer = new AdvancedTokenizer(tokenizerConfig);
+        await this.tokenizer.initialize();
+        await this.attachTokenizerToModel();
+
+        return {
+          content: [{
+            type: "text",
+            text: `Tokenizer initialized with vocabSize=${tokenizerConfig.vocabSize}, embeddingDim=${tokenizerConfig.embeddingDim}, maxSequenceLength=${tokenizerConfig.maxSequenceLength}, legacyMode=${tokenizerConfig.useLegacyCharMode}`
+          }]
+        };
       }
     );
   }
@@ -1361,8 +1438,8 @@ export class HopeMemoryServer {
         await this.model.save(this.modelDir);
       }
 
+      await this.attachTokenizerToModel();
       this.memoryState = this.initializeEmptyState();
-      this.syncModelState();
       this.syncModelState();
 
       // Try to load existing memory state
@@ -1393,7 +1470,7 @@ export class HopeMemoryServer {
       }, 60000); // Save every minute
 
     } catch (error) {
-      // Silent auto-initialization failure
+      this.logger.error('autoInitialize', 'Auto-initialization failed, falling back to defaults', error instanceof Error ? error : new Error(String(error)));
       // Continue with basic initialization
       this.model = new HopeMemoryModel();
       await this.model.initialize({
@@ -1403,6 +1480,7 @@ export class HopeMemoryServer {
         enableHierarchicalMemory: true,
         useHierarchicalMemory: true,
       });
+      await this.attachTokenizerToModel();
       this.memoryState = this.initializeEmptyState();
       this.syncModelState();
     }
