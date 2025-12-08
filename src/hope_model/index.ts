@@ -13,7 +13,7 @@ import type {
   HopeMemoryConfig,
   SerializedAuxiliaryMemoryState
 } from '../types.js';
-import { AdvancedTokenizer } from '../tokenizer/index.js';
+import type { AdvancedTokenizer } from '../tokenizer/index.js';
 import { ContinuumMemory, type ContinuumMemoryConfig, type HopeMemoryState, type HierarchicalStats } from './continuum_memory.js';
 import { RetentiveCore, type RetentiveCoreConfig, type RetentionState } from './retention_core.js';
 import { SelectiveStateSpace } from './mamba_filters.js';
@@ -40,6 +40,9 @@ const DEFAULT_CONFIG: HopeMemoryConfig = {
   enableMomentum: true,
   enableTokenFlow: true,
   enableForgettingGate: true,
+  baseForgettingRate: 0.1,
+  surpriseForgettingWeight: 0.3,
+  consolidationInterval: 100,
   enableHierarchicalMemory: true,
   useHierarchicalMemory: true
 };
@@ -78,6 +81,12 @@ export class HopeMemoryModel implements IMemoryModel {
   private latestMemoryState: HopeMemoryState;
   private tokenFlowState: TokenFlowState;
   private tokenizer?: AdvancedTokenizer;
+  private consolidationCounter = 0;
+  private consolidationInterval = 100;
+  private consolidationStats = {
+    runs: 0,
+    lastRun: 0
+  };
 
   constructor(config: Partial<HopeMemoryConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -88,6 +97,7 @@ export class HopeMemoryModel implements IMemoryModel {
     if (config) {
       this.config = { ...this.config, ...config };
     }
+    this.consolidationInterval = this.config.consolidationInterval ?? 100;
     this.buildComponents();
   }
 
@@ -207,6 +217,10 @@ export class HopeMemoryModel implements IMemoryModel {
     return this.continuumMemory.getStats(this.latestMemoryState);
   }
 
+  public getConsolidationStats(): { runs: number; lastRun: number } {
+    return { ...this.consolidationStats };
+  }
+
   public async encodeText(text: string): Promise<tf.Tensor2D> {
     const cleaned = text.trim().slice(0, 4096);
 
@@ -221,7 +235,7 @@ export class HopeMemoryModel implements IMemoryModel {
           returnTensors: true
         });
 
-        const embeddings = result.embeddings as tf.Tensor2D;
+        const embeddings = result.embeddings;
         const pooled = tf.tidy(() => embeddings.mean(0));
 
         // Dispose tokenizer-attached tensors we no longer need
@@ -235,17 +249,17 @@ export class HopeMemoryModel implements IMemoryModel {
           const pooled1d = pooled as tf.Tensor1D;
 
           if (pooled1d.shape[0] === targetDim) {
-            return pooled1d.expandDims(0) as tf.Tensor2D;
+            return pooled1d.expandDims(0);
           }
 
           if (pooled1d.shape[0] > targetDim) {
             const sliced = pooled1d.slice([0], [targetDim]);
-            return sliced.expandDims(0) as tf.Tensor2D;
+            return sliced.expandDims(0);
           }
 
           const padAmount = targetDim - pooled1d.shape[0];
           const padded = tf.concat([pooled1d, tf.zeros([padAmount])]) as tf.Tensor1D;
-          return padded.expandDims(0) as tf.Tensor2D;
+          return padded.expandDims(0);
         });
 
         pooled.dispose();
@@ -294,7 +308,6 @@ export class HopeMemoryModel implements IMemoryModel {
     }
 
     return tf.tensor2d([Array.from(vec)], [1, this.config.inputDim]);
->>>>>>> c8bd898 (Sure! Pl)
   }
 
   public async storeMemory(text: string): Promise<void> {
@@ -356,7 +369,7 @@ export class HopeMemoryModel implements IMemoryModel {
       const shape = payload.shapes[index];
       if (!variables[index]) { return; }
       const tensor = tf.tensor(values, shape);
-      variables[index].assign(tensor as tf.Tensor);
+      variables[index].assign(tensor);
     });
   }
 
@@ -376,6 +389,58 @@ export class HopeMemoryModel implements IMemoryModel {
   // Alias for IMemoryModel compatibility
   public async saveModel(path: string): Promise<void> {
     await this.save(path);
+  }
+
+  public async snapshot(): Promise<{
+    config: HopeMemoryConfig;
+    weights: number[][];
+    shapes: number[][];
+    optimizer?: { weights: number[][]; shapes: number[][] };
+  }> {
+    const variables = this.getTrainableVariables();
+    const weights = await Promise.all(variables.map(async variable => Array.from(await variable.data())));
+    const shapes = variables.map(variable => variable.shape as number[]);
+
+    let optimizerSnapshot: { weights: number[][]; shapes: number[][] } | undefined;
+    const optimizerWeights = await this.optimizer.getWeights();
+    if (optimizerWeights.length > 0) {
+      optimizerSnapshot = {
+        weights: await Promise.all(optimizerWeights.map(async tensor => Array.from(await tensor.data()))),
+        shapes: optimizerWeights.map(tensor => tensor.shape as number[])
+      };
+    }
+
+    return {
+      config: { ...this.config },
+      weights,
+      shapes,
+      optimizer: optimizerSnapshot
+    };
+  }
+
+  public async restoreSnapshot(payload: {
+    config: HopeMemoryConfig;
+    weights: number[][];
+    shapes: number[][];
+    optimizer?: { weights: number[][]; shapes: number[][] };
+  }): Promise<void> {
+    this.config = { ...this.config, ...payload.config };
+    this.buildComponents();
+    const variables = this.getTrainableVariables();
+    payload.weights.forEach((values, index) => {
+      const shape = payload.shapes[index];
+      if (!variables[index]) { return; }
+      const tensor = tf.tensor(values, shape);
+      variables[index].assign(tensor);
+    });
+
+    if (payload.optimizer) {
+      const tensors = payload.optimizer.weights.map((values, index) =>
+        tf.tensor(values, payload.optimizer?.shapes[index])
+      );
+      await this.optimizer.setWeights(tensors);
+      tensors.forEach(t => t.dispose());
+    }
   }
 
   // IMemoryModel required methods
@@ -422,16 +487,20 @@ export class HopeMemoryModel implements IMemoryModel {
     this.latestMemoryState = state as unknown as HopeMemoryState;
   }
 
-  public async recallMemory(query: string, topK: number = 5): Promise<tf.Tensor2D[]> {
+  public async recallMemory(query: string, topK = 5): Promise<tf.Tensor2D[]> {
     const queryTensor = await this.encodeText(query);
-    const queryTensor2d = queryTensor.expandDims(0) as tf.Tensor2D;
+    const queryTensor2d = queryTensor.expandDims(0);
 
     // Read from memory using the router
     const decision = this.memoryRouter.route(queryTensor2d, this.latestMemoryState);
     const memoryRead = this.continuumMemory.read(this.latestMemoryState, queryTensor2d, decision.weights);
 
     // Return the memory read as a single-element array (simplified recall)
-    return [memoryRead as tf.Tensor2D];
+    return [memoryRead];
+  }
+
+  public distillMemories(similarMemories: tf.Tensor2D[]): tf.Tensor2D {
+    return tf.tidy(() => tf.mean(tf.stack(similarMemories), 0));
   }
 
   public dispose(): void {
@@ -453,7 +522,7 @@ export class HopeMemoryModel implements IMemoryModel {
       const coreInput = tf.concat([normalizedInput, memoryRead], 1);
       const retentionState = this.retentionState ?? this.retentiveCore.initState(1);
       const { outputs, state } = this.retentiveCore.forwardSequence(coreInput, retentionState);
-      const logits = tf.add(tf.matMul(outputs, this.outputKernel), this.outputBias) as tf.Tensor2D;
+      const logits = tf.add(tf.matMul(outputs, this.outputKernel), this.outputBias);
 
       let updatedState = memoryState;
       if (updateState) {
@@ -467,6 +536,13 @@ export class HopeMemoryModel implements IMemoryModel {
         });
         this.retentionState = state;
         this.latestMemoryState = updatedState;
+        this.consolidationCounter += 1;
+        if (this.consolidationCounter % this.consolidationInterval === 0) {
+          this.latestMemoryState = this.continuumMemory.promote(this.latestMemoryState);
+          this.latestMemoryState = this.continuumMemory.prune(this.latestMemoryState, this.config.promotionThreshold);
+          this.consolidationStats.runs += 1;
+          this.consolidationStats.lastRun = Date.now();
+        }
       }
 
       return {
@@ -605,7 +681,7 @@ export class HopeMemoryModel implements IMemoryModel {
     if (typeof x === 'string') {
       inputTensor = await this.encodeText(x);
     } else {
-      inputTensor = tf.tensor2d([x]) as tf.Tensor2D;
+      inputTensor = tf.tensor2d([x]);
     }
 
     const state = (memoryState as HopeMemoryState) ?? this.latestMemoryState;
@@ -624,13 +700,13 @@ export class HopeMemoryModel implements IMemoryModel {
     if (typeof x_t === 'string') {
       inputTensor = await this.encodeText(x_t);
     } else {
-      inputTensor = tf.tensor2d([x_t]) as tf.Tensor2D;
+      inputTensor = tf.tensor2d([x_t]);
     }
 
     if (typeof x_next === 'string') {
       targetTensor = await this.encodeText(x_next);
     } else {
-      targetTensor = tf.tensor2d([x_next]) as tf.Tensor2D;
+      targetTensor = tf.tensor2d([x_next]);
     }
 
     const result = this.trainStep(inputTensor, targetTensor, this.latestMemoryState);
@@ -665,8 +741,8 @@ export class HopeMemoryModel implements IMemoryModel {
       momentumDecay: 0.9,
       enableMomentum: this.config.enableMomentum ?? true,
       enableForgettingGate: this.config.enableForgettingGate ?? true,
-      baseForgettingRate: 0.1,
-      surpriseForgettingWeight: 0.3
+      baseForgettingRate: this.config.baseForgettingRate ?? 0.1,
+      surpriseForgettingWeight: this.config.surpriseForgettingWeight ?? 0.3
     };
     this.continuumMemory = new ContinuumMemory(memoryConfig);
 
@@ -702,6 +778,7 @@ export class HopeMemoryModel implements IMemoryModel {
       windowSize: 32,
       decay: 0.95
     };
+    this.consolidationInterval = this.config.consolidationInterval ?? 100;
   }
 
   private disposeTrainables(): void {

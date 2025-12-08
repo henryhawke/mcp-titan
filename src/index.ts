@@ -87,6 +87,34 @@ export class HopeMemoryServer {
   private logger: StructuredLogger;
   private readonly toolDescriptions = new Map<string, string>();
 
+  private ensureModelReady(): void {
+    if (!this.model || !this.isInitialized) {
+      throw new Error('Model not initialized. Call init_model first.');
+    }
+  }
+
+  private ensureTokenizerReady(): void {
+    if (!this.tokenizer) {
+      throw new Error('Tokenizer not initialized. Call init_tokenizer first.');
+    }
+  }
+
+  private ensureLearnerReady(): void {
+    if (!this.learnerService) {
+      throw new Error('Learner service not initialized. Call init_learner (after init_tokenizer) first.');
+    }
+  }
+
+  private sanitizeTextInput(input: string, maxLength = 10000): string {
+    if (input.length === 0) {
+      throw new Error('Input string cannot be empty');
+    }
+    if (input.length > maxLength) {
+      throw new Error(`Input string exceeds maximum length of ${maxLength} characters`);
+    }
+    return input.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  }
+
   private async attachTokenizerToModel(): Promise<void> {
     if (this.model && this.tokenizer) {
       this.model.attachTokenizer(this.tokenizer);
@@ -292,6 +320,24 @@ export class HopeMemoryServer {
     return tf.tidy(fn);
   }
 
+  private computeHash(payload: unknown): string {
+    return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  }
+
+  private async rotateCheckpoints(directory: string, maxFiles = 5): Promise<void> {
+    const entries = await fs.readdir(directory).catch(() => []);
+    const files = await Promise.all(entries.map(async (name) => {
+      const fullPath = path.join(directory, name);
+      const stats = await fs.stat(fullPath).catch(() => null);
+      return stats && stats.isFile() ? { fullPath, mtime: stats.mtimeMs } : null;
+    }));
+    const valid = files.filter((f): f is { fullPath: string; mtime: number } => Boolean(f));
+    if (valid.length <= maxFiles) { return; }
+    const sorted = valid.sort((a, b) => b.mtime - a.mtime);
+    const toDelete = sorted.slice(maxFiles);
+    await Promise.all(toDelete.map(f => fs.unlink(f.fullPath).catch(() => { })));
+  }
+
   private async wrapWithMemoryManagementAsync<T extends TensorContainer>(fn: () => Promise<T>): Promise<T> {
     tf.engine().startScope();
     try {
@@ -359,11 +405,11 @@ export class HopeMemoryServer {
         if (params?.tool) {
           const match = entries.find(([name]) => name === params.tool);
           helpText = match
-            ? `${match[0]}: ${match[1]}`
+            ? `${match[0]}: ${match[1]}\nExample: { "name": "${match[0]}", "arguments": { /* see schema */ } }`
             : `Tool "${params.tool}" is not registered.`;
         } else {
           const lines = [
-            "Available tools:",
+            "Available tools (call with { name, arguments }):",
             ...entries.map(([name, description]) => `- ${name}: ${description}`)
           ];
           helpText = lines.join('\n');
@@ -378,6 +424,108 @@ export class HopeMemoryServer {
       }
     );
 
+    // Recall tool
+    this.registerToolDefinition(
+      'recall',
+      "Recall memories by query with optional topK",
+      z.object({
+        query: z.string().describe("Query text"),
+        topK: z.number().int().positive().max(50).optional().describe("Number of memories to retrieve")
+      }),
+      async (params) => {
+        await this.ensureInitialized();
+        this.ensureModelReady();
+
+        try {
+          const cleaned = this.sanitizeTextInput(params.query, 5000);
+          const memories = await this.model.recallMemory(cleaned, params.topK ?? 5);
+          const results = memories.map(mem => Array.from(unwrapTensor(mem).dataSync()));
+          memories.forEach(mem => mem.dispose());
+
+          return {
+            content: [{
+              type: "text",
+              text: `Recalled ${results.length} memories`
+            }, {
+              type: "data" as const,
+              data: { memories: results }
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to recall memories: ${message}`
+            }]
+          };
+        }
+      }
+    );
+
+    // Capabilities tool
+    this.registerToolDefinition(
+      'list_capabilities',
+      "List server capabilities and registered tools",
+      z.object({}),
+      async () => {
+        const tools = Array.from(this.toolDescriptions.entries()).map(([name, description]) => ({
+          name,
+          description
+        }));
+
+        return {
+          content: [{
+            type: "data",
+            data: {
+              name: "HOPE Memory",
+              version: HOPE_MEMORY_VERSION,
+              transport: "stdio",
+              tools
+            }
+          }]
+        };
+      }
+    );
+
+    // Distill memories tool
+    this.registerToolDefinition(
+      'distill_memories',
+      "Merge similar memories into a single distilled vector",
+      z.object({
+        memories: z.array(z.array(z.number())).min(1).max(50)
+      }),
+      async (params) => {
+        await this.ensureInitialized();
+        this.ensureModelReady();
+        try {
+          const tensors = params.memories.map(arr => tf.tensor2d([arr]));
+          const distilled = this.model.distillMemories(tensors as tf.Tensor2D[]);
+          const result = Array.from(unwrapTensor(distilled).dataSync());
+          tensors.forEach(t => t.dispose());
+          distilled.dispose();
+
+          return {
+            content: [{
+              type: "text",
+              text: `Distilled memory created with length ${result.length}`
+            }, {
+              type: "data" as const,
+              data: { distilled: result }
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to distill memories: ${message}`
+            }]
+          };
+        }
+      }
+    );
+
     // Bootstrap memory tool
     this.registerToolDefinition(
       'bootstrap_memory',
@@ -387,6 +535,9 @@ export class HopeMemoryServer {
       }),
       async (params) => {
         try {
+          await this.ensureInitialized();
+          this.ensureModelReady();
+
           // Example logic to fetch data and initialize memory
           const documents = await this.fetchDocuments(params.source);
 
@@ -408,7 +559,6 @@ export class HopeMemoryServer {
           }
 
           // Populate memory with summarized documents
-          await this.ensureInitialized();
           let memoriesAdded = 0;
 
           for (const summary of seedSummaries) {
@@ -446,6 +596,39 @@ export class HopeMemoryServer {
             content: [{
               type: "text",
               text: `Failed to bootstrap memory: ${message}`
+            }]
+          };
+        }
+      }
+    );
+
+    // Store memory tool
+    this.registerToolDefinition(
+      'store_memory',
+      "Store a memory with optional type tagging",
+      z.object({
+        text: z.string().describe("Memory text"),
+        type: z.enum(['episodic', 'semantic']).optional().describe("Optional memory type tag")
+      }),
+      async (params) => {
+        await this.ensureInitialized();
+        this.ensureModelReady();
+
+        try {
+          const sanitized = this.sanitizeTextInput(params.text, 10000);
+          await this.model.storeMemory(sanitized);
+          return {
+            content: [{
+              type: "text",
+              text: `Stored memory${params.type ? ` (${params.type})` : ''}`
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to store memory: ${message}`
             }]
           };
         }
@@ -556,7 +739,7 @@ export class HopeMemoryServer {
         await this.ensureInitialized();
 
         try {
-          const input = await this.processInput(params.x) as tf.Tensor2D;
+          const input = await this.processInput(params.x);
           const result = this.model.forward(input, this.memoryState);
 
           const predicted = Array.from(unwrapTensor(result.predicted).dataSync());
@@ -611,8 +794,8 @@ export class HopeMemoryServer {
         await this.ensureInitialized();
 
         try {
-          const currentInput = await this.processInput(params.x_t) as tf.Tensor2D;
-          const nextInput = await this.processInput(params.x_next) as tf.Tensor2D;
+          const currentInput = await this.processInput(params.x_t);
+          const nextInput = await this.processInput(params.x_next);
 
           // Validate dimensions match
           if (currentInput.shape[0] !== nextInput.shape[0]) {
@@ -760,6 +943,55 @@ export class HopeMemoryServer {
       }
     );
 
+    // Momentum metrics
+    this.registerToolDefinition(
+      'get_momentum_metrics',
+      "Get momentum state statistics",
+      z.object({}),
+      async () => {
+        await this.ensureInitialized();
+        this.ensureModelReady();
+
+        try {
+          if (!this.memoryState.momentumState) {
+            return {
+              content: [{
+                type: "text",
+                text: "Momentum state is not enabled or available."
+              }]
+            };
+          }
+
+          const tensor = unwrapTensor(this.memoryState.momentumState) as tf.Tensor2D;
+          const metrics = tf.tidy(() => {
+            const mean = tf.mean(tensor).dataSync()[0];
+            const variance = tf.moments(tensor).variance.dataSync()[0];
+            return {
+              rows: tensor.shape[0],
+              cols: tensor.shape[1] ?? 0,
+              mean,
+              variance
+            };
+          });
+
+          return {
+            content: [{
+              type: "text",
+              text: `Momentum metrics:\n${JSON.stringify(metrics, null, 2)}`
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to get momentum metrics: ${message}`
+            }]
+          };
+        }
+      }
+    );
+
     // Hierarchical memory metrics tool
     this.registerToolDefinition(
       'get_hierarchical_metrics',
@@ -783,6 +1015,7 @@ export class HopeMemoryServer {
           const stats = (this.model as any).memoryStats;
           const shortTermSize = unwrapTensor(this.memoryState.shortTerm).shape[0];
           const longTermSize = unwrapTensor(this.memoryState.longTerm).shape[0];
+          const consolidation = this.model.getConsolidationStats ? this.model.getConsolidationStats() : { runs: 0, lastRun: 0 };
 
           const metrics = {
             promotions: stats.promotions,
@@ -791,6 +1024,8 @@ export class HopeMemoryServer {
             shortTermSize,
             longTermSize,
             totalMemories: shortTermSize + longTermSize,
+            consolidationRuns: consolidation.runs,
+            lastConsolidation: consolidation.lastRun ? new Date(consolidation.lastRun).toISOString() : 'n/a',
             promotionRate: stats.promotions.total > 0 ?
               `${(stats.promotions.recent / stats.promotions.total * 100).toFixed(1)}%` : '0%',
             demotionRate: stats.demotions.total > 0 ?
@@ -854,6 +1089,7 @@ export class HopeMemoryServer {
         const detailed = params.detailed ?? false;
 
         try {
+          await this.ensureInitialized();
           const health = await this.performHealthCheck(detailed ? 'detailed' : 'quick');
 
           return {
@@ -880,7 +1116,8 @@ export class HopeMemoryServer {
       "Prune memory using information-gain scoring to remove less relevant memories",
       z.object({
         threshold: z.number().min(0).max(1).optional().describe("Percentage of memories to keep (0.0 to 1.0)"),
-        force: z.boolean().optional().default(false).describe("Force pruning even if not needed")
+        force: z.boolean().optional().default(false).describe("Force pruning even if not needed"),
+        dryRun: z.boolean().optional().default(false).describe("Preview pruning results without applying")
       }),
       async (params) => {
         await this.ensureInitialized();
@@ -899,11 +1136,23 @@ export class HopeMemoryServer {
           // Get current memory stats before pruning
           const beforeStats = this.model.getPruningStats();
 
-          // Perform pruning
-          await this.model.pruneMemoryByInformationGain(params.threshold);
+          let afterStats = beforeStats;
 
-          // Get stats after pruning
-          const afterStats = this.model.getPruningStats();
+          if (params.dryRun) {
+            const simulated = this.model.pruneMemory(this.memoryState, params.threshold ?? 0.0) as any;
+            afterStats = {
+              shortTerm: unwrapTensor(simulated.shortTerm).shape[0],
+              longTerm: unwrapTensor(simulated.longTerm).shape[0],
+              archive: simulated.archive ? unwrapTensor(simulated.archive).shape[0] : 0,
+              averageSurprise: unwrapTensor(simulated.surpriseHistory).size > 0
+                ? tf.mean(unwrapTensor(simulated.surpriseHistory)).dataSync()[0]
+                : 0
+            };
+          } else {
+            // Perform pruning
+            await this.model.pruneMemoryByInformationGain(params.threshold);
+            afterStats = this.model.getPruningStats();
+          }
 
           const originalCount = beforeStats.shortTerm + beforeStats.longTerm + beforeStats.archive;
           const finalCount = afterStats.shortTerm + afterStats.longTerm + afterStats.archive;
@@ -954,13 +1203,18 @@ export class HopeMemoryServer {
           const memoryState = this.serializeMemoryState();
           memoryState.timestamp = Date.now();
 
+          const modelSnapshot = await this.model.snapshot();
+
           const checkpointData = {
             memoryState,
             inputDim: this.model.getConfig().inputDim, // Add for validation on load
             config: this.model.getConfig(),
+            modelSnapshot,
             version: HOPE_MEMORY_VERSION,
             timestamp: Date.now()
           };
+
+          checkpointData.checksum = this.computeHash(checkpointData);
 
           await fs.mkdir(path.dirname(validatedPath), { recursive: true });
           await fs.writeFile(validatedPath, JSON.stringify(checkpointData, null, 2));
@@ -983,6 +1237,60 @@ export class HopeMemoryServer {
       }
     );
 
+    // Export checkpoint to an auto-named path
+    this.registerToolDefinition(
+      'export_checkpoint',
+      "Export full checkpoint (memory + model + optimizer) to .hope_memory/checkpoints",
+      z.object({
+        label: z.string().optional().describe("Optional label to include in the filename")
+      }),
+      async (params) => {
+        await this.ensureInitialized();
+        this.ensureModelReady();
+
+        try {
+          const checkpointsDir = path.join(this.memoryPath, 'checkpoints');
+          await fs.mkdir(checkpointsDir, { recursive: true });
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const label = params.label ? `-${this.sanitizeTextInput(params.label, 64).replace(/[^a-zA-Z0-9_-]/g, '')}` : '';
+          const filename = `checkpoint-${timestamp}${label}.json`;
+          const targetPath = path.join(checkpointsDir, filename);
+
+          const memoryState = this.serializeMemoryState();
+          memoryState.timestamp = Date.now();
+          const modelSnapshot = await this.model.snapshot();
+
+          const checkpointData = {
+            memoryState,
+            inputDim: this.model.getConfig().inputDim,
+            config: this.model.getConfig(),
+            modelSnapshot,
+            version: HOPE_MEMORY_VERSION,
+            timestamp: Date.now()
+          };
+          checkpointData.checksum = this.computeHash(checkpointData);
+
+          await fs.writeFile(targetPath, JSON.stringify(checkpointData, null, 2));
+          await this.rotateCheckpoints(checkpointsDir);
+
+          return {
+            content: [{
+              type: "text",
+              text: `Checkpoint exported to ${targetPath}`
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to export checkpoint: ${message}`
+            }]
+          };
+        }
+      }
+    );
+
     // Load checkpoint tool
     this.registerToolDefinition(
       'load_checkpoint',
@@ -992,75 +1300,43 @@ export class HopeMemoryServer {
       }),
       async (params) => {
         try {
+          await this.ensureInitialized();
+          this.ensureModelReady();
           // Validate and sanitize the file path
           const validatedPath = this.validateFilePath(params.path);
 
-          const data = await fs.readFile(validatedPath, 'utf-8');
-          const checkpointData = JSON.parse(data) as {
-            memoryState?: SerializedMemoryState | {
-              shortTerm: number[];
-              longTerm: number[];
-              meta: number[];
-              timestamps: number[];
-              accessCounts: number[];
-              surpriseHistory: number[];
-            };
-            shapes?: Record<string, number[]>;
-            inputDim?: number;
-          };
-
-          // Validate embedding dimensions match if specified
-          if (checkpointData.inputDim && this.model) {
-            const currentInputDim = this.model.getConfig().inputDim;
-            if (checkpointData.inputDim !== currentInputDim) {
-              return {
-                content: [{
-                  type: "text",
-                  text: `Checkpoint dimension mismatch: checkpoint has inputDim=${checkpointData.inputDim}, but model has inputDim=${currentInputDim}. Please reinitialize model with matching dimensions.`
-                }]
-              };
-            }
-          }
-
-          let serializedState: SerializedMemoryState | undefined;
-          if (checkpointData.memoryState && 'shapes' in (checkpointData.memoryState as SerializedMemoryState)) {
-            serializedState = checkpointData.memoryState as SerializedMemoryState;
-          } else if (checkpointData.memoryState) {
-            const legacy = checkpointData.memoryState as {
-              shortTerm: number[];
-              longTerm: number[];
-              meta: number[];
-              timestamps: number[];
-              accessCounts: number[];
-              surpriseHistory: number[];
-            };
-            serializedState = {
-              shapes: checkpointData.shapes ?? {},
-              shortTerm: legacy.shortTerm,
-              longTerm: legacy.longTerm,
-              meta: legacy.meta,
-              timestamps: legacy.timestamps,
-              accessCounts: legacy.accessCounts,
-              surpriseHistory: legacy.surpriseHistory
-            };
-          }
-
-          if (serializedState) {
-            this.restoreSerializedMemoryState(serializedState);
-          }
-
-          return {
-            content: [{
-              type: "text",
-              text: `Checkpoint loaded from ${validatedPath}`
-            }]
-          };
+          return await this.loadCheckpointFile(validatedPath);
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error';
           return {
             content: [{
               type: "text",
               text: `Failed to load checkpoint: ${message}`
+            }]
+          };
+        }
+      }
+    );
+
+    // Import checkpoint helper (alias)
+    this.registerToolDefinition(
+      'import_checkpoint',
+      "Import checkpoint from .hope_memory/checkpoints by filename",
+      z.object({
+        filename: z.string().describe("Checkpoint filename inside .hope_memory/checkpoints")
+      }),
+      async (params) => {
+        try {
+          await this.ensureInitialized();
+          this.ensureModelReady();
+          const targetPath = path.join(this.memoryPath, 'checkpoints', params.filename);
+          return await this.loadCheckpointFile(targetPath);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to import checkpoint: ${message}`
             }]
           };
         }
@@ -1088,18 +1364,7 @@ export class HopeMemoryServer {
 
         try {
           // Initialize tokenizer if not already done
-          if (!this.tokenizer) {
-            // TODO: Replace with proper AdvancedTokenizer integration
-            // Current limitation: AdvancedTokenizer.encode() is async, but ITokenizer requires sync
-            // For production use, refactor learner service to be async or pre-initialize tokenizer
-            this.logger.warn('init_learner', 'Using fallback tokenizer. For production, integrate AdvancedTokenizer properly.');
-
-            throw new Error(
-              'Tokenizer not initialized. The learner service requires a properly initialized tokenizer. ' +
-              'This is a known limitation - AdvancedTokenizer is async but the current interface is sync. ' +
-              'Please initialize the tokenizer before calling start_learning, or refactor to async.'
-            );
-          }
+          this.ensureTokenizerReady();
 
           const learnerConfig: Partial<LearnerConfig> = {
             bufferSize: params.bufferSize,
@@ -1141,14 +1406,8 @@ export class HopeMemoryServer {
       z.object({}),
       async () => {
         try {
-          if (!this.learnerService) {
-            return {
-              content: [{
-                type: "text",
-                text: "Learner service not initialized. Please run init_learner first."
-              }]
-            };
-          }
+          await this.ensureInitialized();
+          this.ensureLearnerReady();
 
           this.learnerService.pauseTraining();
 
@@ -1170,6 +1429,66 @@ export class HopeMemoryServer {
       }
     );
 
+    // Stop learner tool (alias to pause with resource cleanup)
+    this.registerToolDefinition(
+      'stop_learner',
+      "Stop the online learning loop and dispose interval",
+      z.object({}),
+      async () => {
+        try {
+          await this.ensureInitialized();
+          this.ensureLearnerReady();
+
+          this.learnerService.pauseTraining();
+
+          return {
+            content: [{
+              type: "text",
+              text: "Online learning loop stopped successfully"
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to stop learner: ${message}`
+            }]
+          };
+        }
+      }
+    );
+
+    // Start learner tool
+    this.registerToolDefinition(
+      'start_learner',
+      "Start the online learning loop",
+      z.object({}),
+      async () => {
+        try {
+          await this.ensureInitialized();
+          this.ensureLearnerReady();
+
+          this.learnerService.startTraining();
+
+          return {
+            content: [{
+              type: "text",
+              text: "Online learning loop started successfully"
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to start learner: ${message}`
+            }]
+          };
+        }
+      }
+    );
+
     // Resume learner tool
     this.registerToolDefinition(
       'resume_learner',
@@ -1177,14 +1496,8 @@ export class HopeMemoryServer {
       z.object({}),
       async () => {
         try {
-          if (!this.learnerService) {
-            return {
-              content: [{
-                type: "text",
-                text: "Learner service not initialized. Please run init_learner first."
-              }]
-            };
-          }
+          await this.ensureInitialized();
+          this.ensureLearnerReady();
 
           this.learnerService.resumeTraining();
 
@@ -1213,14 +1526,8 @@ export class HopeMemoryServer {
       z.object({}),
       async () => {
         try {
-          if (!this.learnerService) {
-            return {
-              content: [{
-                type: "text",
-                text: "Learner service not initialized. Please run init_learner first."
-              }]
-            };
-          }
+          await this.ensureInitialized();
+          this.ensureLearnerReady();
 
           const stats = this.learnerService.getTrainingStats();
 
@@ -1247,6 +1554,40 @@ export class HopeMemoryServer {
       }
     );
 
+    // Learner status alias
+    this.registerToolDefinition(
+      'learner_status',
+      "Alias for get_learner_stats to report learner status",
+      z.object({}),
+      async () => {
+        try {
+          await this.ensureInitialized();
+          this.ensureLearnerReady();
+          const stats = this.learnerService.getTrainingStats();
+
+          return {
+            content: [{
+              type: "text",
+              text: `Learner Status:
+- Buffer size: ${stats.bufferSize}
+- Step count: ${stats.stepCount}
+- Is running: ${stats.isRunning}
+- Average loss: ${stats.averageLoss.toFixed(6)}
+- Last loss: ${stats.lastLoss.toFixed(6)}`
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to get learner status: ${message}`
+            }]
+          };
+        }
+      }
+    );
+
     // Add training sample tool
     this.registerToolDefinition(
       'add_training_sample',
@@ -1258,37 +1599,31 @@ export class HopeMemoryServer {
         negative: z.union([z.string(), z.array(z.number())]).optional().describe("Negative sample for contrastive learning")
       }),
       async (params) => {
+        await this.ensureInitialized();
         const createdTensors: tf.Tensor[] = [];
 
         const input = Array.isArray(params.input)
           ? (() => { const tensor = tf.tensor1d(params.input); createdTensors.push(tensor); return tensor; })()
-          : params.input;
+          : this.sanitizeTextInput(params.input, 10000);
 
         const target = Array.isArray(params.target)
           ? (() => { const tensor = tf.tensor1d(params.target); createdTensors.push(tensor); return tensor; })()
-          : params.target;
+          : this.sanitizeTextInput(params.target, 10000);
 
         const positive = params.positive === undefined
           ? undefined
           : Array.isArray(params.positive)
-            ? (() => { const tensor = tf.tensor1d(params.positive!); createdTensors.push(tensor); return tensor; })()
-            : params.positive;
+            ? (() => { const tensor = tf.tensor1d(params.positive); createdTensors.push(tensor); return tensor; })()
+            : this.sanitizeTextInput(params.positive, 10000);
 
         const negative = params.negative === undefined
           ? undefined
           : Array.isArray(params.negative)
-            ? (() => { const tensor = tf.tensor1d(params.negative!); createdTensors.push(tensor); return tensor; })()
-            : params.negative;
+            ? (() => { const tensor = tf.tensor1d(params.negative); createdTensors.push(tensor); return tensor; })()
+            : this.sanitizeTextInput(params.negative, 10000);
 
         try {
-          if (!this.learnerService) {
-            return {
-              content: [{
-                type: "text",
-                text: "Learner service not initialized. Please run init_learner first."
-              }]
-            };
-          }
+          this.ensureLearnerReady();
 
           await this.learnerService.addTrainingSample(input, target, positive, negative);
 
@@ -1315,6 +1650,57 @@ export class HopeMemoryServer {
           for (const tensor of createdTensors) {
             tensor.dispose();
           }
+        }
+      }
+    );
+
+    // Batch enqueue training samples
+    this.registerToolDefinition(
+      'enqueue_samples',
+      "Batch add training samples to the replay buffer",
+      z.object({
+        samples: z.array(z.object({
+          input: z.union([z.string(), z.array(z.number())]).describe("Input data (text or number array)"),
+          target: z.union([z.string(), z.array(z.number())]).describe("Target data (text or number array)"),
+          positive: z.union([z.string(), z.array(z.number())]).optional().describe("Positive sample for contrastive learning"),
+          negative: z.union([z.string(), z.array(z.number())]).optional().describe("Negative sample for contrastive learning")
+        })).min(1).max(100).describe("Samples to enqueue (max 100 per call)")
+      }),
+      async (params) => {
+        await this.ensureInitialized();
+        try {
+          this.ensureLearnerReady();
+
+          let added = 0;
+          for (const sample of params.samples) {
+            await this.learnerService!.addTrainingSample(
+              typeof sample.input === 'string' ? this.sanitizeTextInput(sample.input, 10000) : sample.input,
+              typeof sample.target === 'string' ? this.sanitizeTextInput(sample.target, 10000) : sample.target,
+              typeof sample.positive === 'string' ? this.sanitizeTextInput(sample.positive, 10000) : sample.positive,
+              typeof sample.negative === 'string' ? this.sanitizeTextInput(sample.negative, 10000) : sample.negative
+            );
+            added += 1;
+          }
+
+          const stats = this.learnerService!.getTrainingStats();
+
+          return {
+            content: [{
+              type: "text",
+              text: `Enqueued ${added} samples. Buffer size: ${stats.bufferSize}`
+            }, {
+              type: "data" as const,
+              data: stats
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to enqueue samples: ${message}`
+            }]
+          };
         }
       }
     );
@@ -1381,18 +1767,94 @@ export class HopeMemoryServer {
     return resolved;
   }
 
+  private async loadCheckpointFile(validatedPath: string): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const data = await fs.readFile(validatedPath, 'utf-8');
+    const checkpointData = JSON.parse(data) as {
+      memoryState?: SerializedMemoryState | {
+        shortTerm: number[];
+        longTerm: number[];
+        meta: number[];
+        timestamps: number[];
+        accessCounts: number[];
+        surpriseHistory: number[];
+      };
+      shapes?: Record<string, number[]>;
+      inputDim?: number;
+      modelSnapshot?: Awaited<ReturnType<HopeMemoryModel['snapshot']>>;
+      checksum?: string;
+    };
+
+    if (checkpointData.checksum) {
+      const checksum = checkpointData.checksum;
+      const cloned = { ...checkpointData };
+      delete (cloned as any).checksum;
+      const computed = this.computeHash(cloned);
+      if (checksum !== computed) {
+        return {
+          content: [{
+            type: "text",
+            text: "Checkpoint checksum mismatch. The file may be corrupted."
+          }]
+        };
+      }
+    }
+
+    // Validate embedding dimensions match if specified
+    if (checkpointData.inputDim && this.model) {
+      const currentInputDim = this.model.getConfig().inputDim;
+      if (checkpointData.inputDim !== currentInputDim) {
+        return {
+          content: [{
+            type: "text",
+            text: `Checkpoint dimension mismatch: checkpoint has inputDim=${checkpointData.inputDim}, but model has inputDim=${currentInputDim}. Please reinitialize model with matching dimensions.`
+          }]
+        };
+      }
+    }
+
+    let serializedState: SerializedMemoryState | undefined;
+    if (checkpointData.memoryState && 'shapes' in (checkpointData.memoryState as SerializedMemoryState)) {
+      serializedState = checkpointData.memoryState as SerializedMemoryState;
+    } else if (checkpointData.memoryState) {
+      const legacy = checkpointData.memoryState as {
+        shortTerm: number[];
+        longTerm: number[];
+        meta: number[];
+        timestamps: number[];
+        accessCounts: number[];
+        surpriseHistory: number[];
+      };
+      serializedState = {
+        shapes: checkpointData.shapes ?? {},
+        shortTerm: legacy.shortTerm,
+        longTerm: legacy.longTerm,
+        meta: legacy.meta,
+        timestamps: legacy.timestamps,
+        accessCounts: legacy.accessCounts,
+        surpriseHistory: legacy.surpriseHistory
+      };
+    }
+
+    if (serializedState) {
+      this.restoreSerializedMemoryState(serializedState);
+    }
+
+    if (checkpointData.modelSnapshot && this.model) {
+      await this.model.restoreSnapshot(checkpointData.modelSnapshot);
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: `Checkpoint loaded from ${validatedPath}`
+      }]
+    };
+  }
+
   private async processInput(input: string | number[]): Promise<tf.Tensor2D> {
     // Type guard and validation
     if (typeof input === 'string') {
-      // Validate string input
-      if (input.length === 0) {
-        throw new Error('Input string cannot be empty');
-      }
-      if (input.length > 10000) {
-        throw new Error('Input string exceeds maximum length of 10000 characters');
-      }
-      // Sanitize input by removing control characters except newlines and tabs
-      const sanitized = input.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+      const sanitized = this.sanitizeTextInput(input, 10000);
       return await this.model.encodeText(sanitized);
     } else if (Array.isArray(input)) {
       // Validate array input
@@ -1406,7 +1868,7 @@ export class HopeMemoryServer {
       if (!input.every(x => typeof x === 'number' && !isNaN(x) && isFinite(x))) {
         throw new Error('Input array must contain only valid finite numbers');
       }
-      return tf.tensor2d([input]) as tf.Tensor2D;
+      return tf.tensor2d([input]);
     } else {
       throw new Error(`Invalid input type: expected string or number array, got ${typeof input}`);
     }
@@ -1496,6 +1958,14 @@ export class HopeMemoryServer {
         path.join(this.memoryPath, 'memory_state.json'),
         JSON.stringify(serialized, null, 2)
       );
+
+      if (this.model) {
+        const snapshot = await this.model.snapshot();
+        await fs.writeFile(
+          path.join(this.memoryPath, 'hope_model_state.json'),
+          JSON.stringify({ ...snapshot, timestamp: Date.now() }, null, 2)
+        );
+      }
     } catch (error) {
       // Silent failure
     }
@@ -1506,6 +1976,13 @@ export class HopeMemoryServer {
       const data = await fs.readFile(path.join(this.memoryPath, 'memory_state.json'), 'utf-8');
       const state = JSON.parse(data) as SerializedMemoryState;
       this.restoreSerializedMemoryState(state);
+
+      const modelStatePath = path.join(this.memoryPath, 'hope_model_state.json');
+      const modelStateExists = await fs.access(modelStatePath).then(() => true).catch(() => false);
+      if (modelStateExists && this.model) {
+        const modelData = JSON.parse(await fs.readFile(modelStatePath, 'utf-8')) as Awaited<ReturnType<HopeMemoryModel['snapshot']>>;
+        await this.model.restoreSnapshot(modelData);
+      }
     } catch (error) {
       // Silent failure - continue with default state
     }
@@ -1662,6 +2139,61 @@ export class HopeMemoryServer {
           health.warnings = health.warnings || [];
           health.warnings.push('Memory capacity > 90% - consider pruning');
         }
+
+        // Learner status
+        if (this.learnerService) {
+          const stats = this.learnerService.getTrainingStats();
+          health.learner = {
+            bufferSize: stats.bufferSize,
+            stepCount: stats.stepCount,
+            isRunning: stats.isRunning,
+            averageLoss: stats.averageLoss,
+            lastLoss: stats.lastLoss
+          };
+        }
+
+        // Tokenizer status
+        if (this.tokenizer && typeof (this.tokenizer as any).getStats === 'function') {
+          const tokStats = (this.tokenizer as any).getStats();
+          health.tokenizer = {
+            vocabSize: tokStats?.bpe?.vocabSize ?? tokStats?.embedding?.vocabSize,
+            mode: tokStats?.mode ?? 'unknown',
+            bootstrapCount: tokStats?.bootstrapCount ?? 0
+          };
+        }
+
+        // Promotion/demotion stats if available
+        if ((this.model as any).memoryStats) {
+          const mStats = (this.model as any).memoryStats;
+          health.hierarchy = {
+            promotions: mStats.promotions,
+            demotions: mStats.demotions,
+            lastUpdate: new Date(mStats.lastStatsUpdate).toISOString()
+          };
+        }
+
+        // Check checkpoint freshness
+        try {
+          const memoryStat = await fs.stat(path.join(this.memoryPath, 'memory_state.json')).catch(() => null);
+          const modelStat = await fs.stat(path.join(this.memoryPath, 'hope_model_state.json')).catch(() => null);
+          const latest = Math.max(
+            memoryStat?.mtimeMs ?? 0,
+            modelStat?.mtimeMs ?? 0
+          );
+          if (latest > 0) {
+            const ageMs = Date.now() - latest;
+            health.checkpoints = {
+              lastSavedMsAgo: ageMs,
+              lastSaved: new Date(latest).toISOString()
+            };
+            if (ageMs > 1000 * 60 * 60) {
+              health.warnings = health.warnings || [];
+              health.warnings.push('Checkpoint older than 1 hour - consider saving');
+            }
+          }
+        } catch {
+          // ignore freshness errors
+        }
       }
 
       if (checkType === 'detailed') {
@@ -1739,7 +2271,10 @@ export class HopeMemoryServer {
       // Check if source is a URL
       if (source.startsWith('http://') || source.startsWith('https://')) {
         // Fetch content from URL
-        const response = await fetch(source);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const response = await fetch(source, { signal: controller.signal });
+        clearTimeout(timeout);
         if (!response.ok) {
           throw new Error(`Failed to fetch URL: ${response.status} ${response.statusText}`);
         }
@@ -1756,8 +2291,9 @@ export class HopeMemoryServer {
 
         return sentences;
       } else {
-        // Treat as text corpus
-        const sentences = source
+        // Treat as text corpus with sanitization and length guard
+        const sanitized = this.sanitizeTextInput(source, 100000);
+        const sentences = sanitized
           .replace(/\n{2,}/g, '\n')
           .split(/[.!?]+/)
           .map(s => s.trim())

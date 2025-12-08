@@ -85,28 +85,29 @@ export class StructuredLogger {
         metadata?: Record<string, any>,
         error?: { name: string; message: string; stack?: string }
     ): void {
+        const safeMetadata = this.redactMetadata(metadata);
         const entry: LogEntry = {
             timestamp: new Date().toISOString(),
             level,
             operation,
             message,
-            metadata,
+            metadata: safeMetadata,
             error
         };
 
         const consoleMsg = `[${entry.timestamp}] ${level} [${operation}]: ${message}`;
         switch (level) {
             case 'ERROR':
-                console.error(consoleMsg, metadata, error);
+                console.error(consoleMsg, safeMetadata, error);
                 break;
             case 'WARN':
-                console.warn(consoleMsg, metadata);
+                console.warn(consoleMsg, safeMetadata);
                 break;
             case 'DEBUG':
-                console.debug(consoleMsg, metadata);
+                console.debug(consoleMsg, safeMetadata);
                 break;
             default:
-                console.log(consoleMsg, metadata);
+                console.log(consoleMsg, safeMetadata);
         }
 
         this.logBuffer.push(entry);
@@ -173,5 +174,20 @@ export class StructuredLogger {
             clearInterval(this.flushInterval);
         }
         await this.flush();
+    }
+
+    private redactMetadata(metadata?: Record<string, any>): Record<string, any> | undefined {
+        if (!metadata) { return metadata; }
+        const redacted: Record<string, any> = {};
+        const sensitiveKeys = ['token', 'password', 'secret', 'authorization', 'auth', 'key'];
+
+        for (const [key, value] of Object.entries(metadata)) {
+            if (sensitiveKeys.some(s => key.toLowerCase().includes(s))) {
+                redacted[key] = '[REDACTED]';
+            } else {
+                redacted[key] = value;
+            }
+        }
+        return redacted;
     }
 }

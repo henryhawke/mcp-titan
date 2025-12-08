@@ -231,6 +231,49 @@ npx @henryhawke/mcp-titan
 
 ---
 
+## Operational Quickstart
+
+1) Run server: `bun run build && bun start` (or `npx @henryhawke/mcp-titan`)
+2) Initialize tools in order:
+   - `init_model`
+   - `init_tokenizer`
+   - `start_learner`
+3) Store and recall:
+   - Store: `store_memory { text, type?: episodic|semantic }`
+   - Recall: `recall { query, topK? }`
+   - Distill: `distill_memories { memories: number[][] }`
+4) Online learning:
+   - Add data: `enqueue_samples` (batch of input/target pairs, optional positive/negative)
+   - Status: `learner_status`
+   - Control: `start_learner`, `pause_learner`, `stop_learner`
+5) Checkpoints:
+   - Save: `save_checkpoint { path }`
+   - Auto-export: `export_checkpoint` → `.hope_memory/checkpoints`
+   - Import: `import_checkpoint { filename }` or `load_checkpoint { path }`
+6) Health:
+   - `health_check --detailed`
+   - `get_hierarchical_metrics`, `get_momentum_metrics`, `get_token_flow_metrics`
+7) Safety defaults:
+   - Inputs sanitized and length-capped; arrays validated; paths sandboxed
+   - URL bootstrap uses timeouts/size guards
+   - Logs are structured, rotated, redacted
+
+## Dumbed Down Getting Started
+
+1) `bun run build && bun start`
+2) Call `init_model`, then `init_tokenizer`, then `start_learner`
+3) `store_memory` to save facts; `recall` to fetch them
+4) `enqueue_samples` to teach; watch `learner_status`
+5) `export_checkpoint` to back up; `import_checkpoint` to restore
+6) If stuck: `health_check --detailed`
+
+## Backward Compatibility
+
+- Titan aliases are still exported (e.g., `TitanMemoryModel` → HOPE)
+- Checkpoints include version + checksum and validate dimensions on load
+
+---
+
 ## Usage Examples
 
 ### Basic Memory Operations

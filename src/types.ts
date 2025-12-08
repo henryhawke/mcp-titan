@@ -140,6 +140,8 @@ export const HopeMemoryConfigSchema = z.object({
   enableMomentum: z.boolean().default(true).describe("Enable momentum-based memory updates"),
   enableTokenFlow: z.boolean().default(true).describe("Enable token flow tracking"),
   enableForgettingGate: z.boolean().default(false).describe("Enable learnable forgetting gate"),
+  baseForgettingRate: z.number().min(0).max(1).default(0.1).describe("Base forgetting rate"),
+  surpriseForgettingWeight: z.number().min(0).max(1).default(0.3).describe("Surprise influence on forgetting"),
   enableHierarchicalMemory: z.boolean().default(true).describe("Enable hierarchical memory tiers (always true for HOPE)"),
   useHierarchicalMemory: z.boolean().default(true).describe("Alias for enableHierarchicalMemory")
 });
