@@ -42,3 +42,4 @@ describe('Conflict marker guard', () => {
     }
   });
 });
+
