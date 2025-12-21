@@ -67,19 +67,19 @@ export interface TokenFlowState {
 
 export class HopeMemoryModel implements IMemoryModel {
   private config: HopeMemoryConfig;
-  private continuumMemory: ContinuumMemory;
-  private selectiveFilter: SelectiveStateSpace;
-  private retentiveCore: RetentiveCore;
-  private memoryRouter: MemoryRouter;
-  private compressionHook: DeltaCompressionHook;
-  private layerScheduler: LayerScheduler;
-  private updateBuffer: UpdateBuffer;
-  private outputKernel: tf.Variable<tf.Rank.R2>;
-  private outputBias: tf.Variable<tf.Rank.R1>;
-  private optimizer: tf.AdamOptimizer;
+  private continuumMemory!: ContinuumMemory;
+  private selectiveFilter!: SelectiveStateSpace;
+  private retentiveCore!: RetentiveCore;
+  private memoryRouter!: MemoryRouter;
+  private compressionHook!: DeltaCompressionHook;
+  private layerScheduler!: LayerScheduler;
+  private updateBuffer!: UpdateBuffer;
+  private outputKernel!: tf.Variable<tf.Rank.R2>;
+  private outputBias!: tf.Variable<tf.Rank.R1>;
+  private optimizer!: tf.AdamOptimizer;
   private retentionState?: RetentionState;
-  private latestMemoryState: HopeMemoryState;
-  private tokenFlowState: TokenFlowState;
+  private latestMemoryState!: HopeMemoryState;
+  private tokenFlowState!: TokenFlowState;
   private tokenizer?: AdvancedTokenizer;
   private consolidationCounter = 0;
   private consolidationInterval = 100;
@@ -244,22 +244,22 @@ export class HopeMemoryModel implements IMemoryModel {
           (result as any).attentionMask.dispose();
         }
 
-        const adjusted = tf.tidy(() => {
+        const adjusted = tf.tidy<tf.Tensor2D>(() => {
           const targetDim = this.config.inputDim;
           const pooled1d = pooled as tf.Tensor1D;
 
           if (pooled1d.shape[0] === targetDim) {
-            return pooled1d.expandDims(0);
+            return pooled1d.expandDims(0) as tf.Tensor2D;
           }
 
           if (pooled1d.shape[0] > targetDim) {
             const sliced = pooled1d.slice([0], [targetDim]);
-            return sliced.expandDims(0);
+            return sliced.expandDims(0) as tf.Tensor2D;
           }
 
           const padAmount = targetDim - pooled1d.shape[0];
           const padded = tf.concat([pooled1d, tf.zeros([padAmount])]) as tf.Tensor1D;
-          return padded.expandDims(0);
+          return padded.expandDims(0) as tf.Tensor2D;
         });
 
         pooled.dispose();
@@ -395,18 +395,19 @@ export class HopeMemoryModel implements IMemoryModel {
     config: HopeMemoryConfig;
     weights: number[][];
     shapes: number[][];
-    optimizer?: { weights: number[][]; shapes: number[][] };
+    optimizer?: { weights: number[][]; shapes: number[][]; names: string[] };
   }> {
     const variables = this.getTrainableVariables();
     const weights = await Promise.all(variables.map(async variable => Array.from(await variable.data())));
     const shapes = variables.map(variable => variable.shape as number[]);
 
-    let optimizerSnapshot: { weights: number[][]; shapes: number[][] } | undefined;
+    let optimizerSnapshot: { weights: number[][]; shapes: number[][]; names: string[] } | undefined;
     const optimizerWeights = await this.optimizer.getWeights();
     if (optimizerWeights.length > 0) {
       optimizerSnapshot = {
-        weights: await Promise.all(optimizerWeights.map(async tensor => Array.from(await tensor.data()))),
-        shapes: optimizerWeights.map(tensor => tensor.shape as number[])
+        weights: await Promise.all(optimizerWeights.map(async tensor => Array.from(await tensor.tensor.data()))),
+        shapes: optimizerWeights.map(tensor => tensor.tensor.shape as number[]),
+        names: optimizerWeights.map(tensor => tensor.name)
       };
     }
 
@@ -422,7 +423,7 @@ export class HopeMemoryModel implements IMemoryModel {
     config: HopeMemoryConfig;
     weights: number[][];
     shapes: number[][];
-    optimizer?: { weights: number[][]; shapes: number[][] };
+    optimizer?: { weights: number[][]; shapes: number[][]; names?: string[] };
   }): Promise<void> {
     this.config = { ...this.config, ...payload.config };
     this.buildComponents();
@@ -435,11 +436,12 @@ export class HopeMemoryModel implements IMemoryModel {
     });
 
     if (payload.optimizer) {
-      const tensors = payload.optimizer.weights.map((values, index) =>
-        tf.tensor(values, payload.optimizer?.shapes[index])
-      );
+      const tensors = payload.optimizer.weights.map((values, index) => ({
+        name: payload.optimizer?.names?.[index] ?? `optimizer_weight_${index}`,
+        tensor: tf.tensor(values, payload.optimizer?.shapes[index])
+      }));
       await this.optimizer.setWeights(tensors);
-      tensors.forEach(t => t.dispose());
+      tensors.forEach(t => t.tensor.dispose());
     }
   }
 
@@ -489,7 +491,7 @@ export class HopeMemoryModel implements IMemoryModel {
 
   public async recallMemory(query: string, topK = 5): Promise<tf.Tensor2D[]> {
     const queryTensor = await this.encodeText(query);
-    const queryTensor2d = queryTensor.expandDims(0);
+    const queryTensor2d = this.ensure2d(queryTensor);
 
     // Read from memory using the router
     const decision = this.memoryRouter.route(queryTensor2d, this.latestMemoryState);
@@ -522,14 +524,17 @@ export class HopeMemoryModel implements IMemoryModel {
       const coreInput = tf.concat([normalizedInput, memoryRead], 1);
       const retentionState = this.retentionState ?? this.retentiveCore.initState(1);
       const { outputs, state } = this.retentiveCore.forwardSequence(coreInput, retentionState);
-      const logits = tf.add(tf.matMul(outputs, this.outputKernel), this.outputBias);
+      const logits = tf.add(tf.matMul(outputs, this.outputKernel), this.outputBias) as tf.Tensor2D;
 
       let updatedState = memoryState;
       if (updateState) {
         // HOPE Paper: Weight surprise by token flow for sequential dependencies
         const weightedSurprise = this.weightSurpriseByTokenFlow(readWeights.surprise);
 
-        updatedState = this.continuumMemory.write(memoryState, outputs.slice([outputs.shape[0] - 1, 0], [1, -1]), {
+        const rawWriteVector = outputs.slice([outputs.shape[0] - 1, 0], [1, -1]) as tf.Tensor2D;
+        const alignedWriteVector = this.alignToDim(rawWriteVector, this.config.memoryDim);
+
+        updatedState = this.continuumMemory.write(memoryState, alignedWriteVector, {
           surprise: weightedSurprise,
           timestamp: Date.now(),
           routeWeights: readWeights.weights
@@ -580,11 +585,37 @@ export class HopeMemoryModel implements IMemoryModel {
     };
   }
 
-  private ensure2d(tensor: tf.Tensor2D): tf.Tensor2D {
-    if (tensor.rank === 2) {
+  private ensure2d(tensor: tf.Tensor | tf.Tensor2D): tf.Tensor2D {
+    return tf.tidy(() => {
+      if (tensor.rank === 2 && tensor.shape[1] === this.config.inputDim) {
+        return tensor as tf.Tensor2D;
+      }
+
+      const flat = tensor.flatten() as tf.Tensor1D;
+      const targetDim = this.config.inputDim;
+      const currentSize = flat.shape[0];
+
+      const adjusted = currentSize >= targetDim
+        ? flat.slice([0], [targetDim]) as tf.Tensor1D
+        : tf.concat([flat, tf.zeros([targetDim - currentSize])]) as tf.Tensor1D;
+
+      return adjusted.reshape([1, targetDim]) as tf.Tensor2D;
+    });
+  }
+
+  private alignToDim(tensor: tf.Tensor2D, targetDim: number): tf.Tensor2D {
+    if (tensor.shape[1] === targetDim) {
       return tensor;
     }
-    return tensor.reshape([tensor.shape[0] ?? 1, this.config.inputDim]);
+
+    return tf.tidy(() => {
+      if (tensor.shape[1] > targetDim) {
+        return tensor.slice([0, 0], [tensor.shape[0], targetDim]) as tf.Tensor2D;
+      }
+      const pad = targetDim - tensor.shape[1];
+      const padding = tf.zeros([tensor.shape[0], pad]);
+      return tf.concat([tensor, padding], 1) as tf.Tensor2D;
+    });
   }
 
   /**
@@ -788,8 +819,9 @@ export class HopeMemoryModel implements IMemoryModel {
       if (this.retentionState?.hidden) {
         tf.dispose(this.retentionState.hidden);
       }
-      if (this.retentionState?.cell) {
-        tf.dispose(this.retentionState.cell);
+      if (this.retentionState?.filter) {
+        tf.dispose(this.retentionState.filter.carry);
+        tf.dispose(this.retentionState.filter.bandwidth);
       }
     } catch {
       // best-effort cleanup

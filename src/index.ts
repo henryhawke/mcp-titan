@@ -12,7 +12,7 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version?: string };
 
-import type { IMemoryState, SerializedAuxiliaryMemoryState } from './types.js';
+import type { HopeMemoryConfig, IMemoryState, SerializedAuxiliaryMemoryState } from './types.js';
 import { wrapTensor, unwrapTensor } from './types.js';
 import { HopeMemoryModel } from './model.js';
 export { HopeMemoryModel } from './model.js';
@@ -65,6 +65,28 @@ interface MemoryStats {
   patternDiversity: number;
 }
 
+interface CheckpointFile {
+  memoryState: SerializedMemoryState;
+  inputDim: number;
+  config: HopeMemoryConfig;
+  modelSnapshot: Awaited<ReturnType<HopeMemoryModel['snapshot']>>;
+  version: string;
+  timestamp: number;
+  checksum?: string;
+}
+
+type PartialCheckpointFile = Partial<CheckpointFile> & {
+  memoryState?: SerializedMemoryState | {
+    shortTerm: number[];
+    longTerm: number[];
+    meta: number[];
+    timestamps: number[];
+    accessCounts: number[];
+    surpriseHistory: number[];
+  };
+  shapes?: Record<string, number[]>;
+};
+
 const versionFromPackage = typeof packageJson.version === 'string' ? packageJson.version : '0.0.0';
 export const HOPE_MEMORY_VERSION = versionFromPackage;
 export const TITAN_MEMORY_VERSION = HOPE_MEMORY_VERSION;
@@ -87,22 +109,25 @@ export class HopeMemoryServer {
   private logger: StructuredLogger;
   private readonly toolDescriptions = new Map<string, string>();
 
-  private ensureModelReady(): void {
+  private ensureModelReady(): HopeMemoryModel {
     if (!this.model || !this.isInitialized) {
       throw new Error('Model not initialized. Call init_model first.');
     }
+    return this.model;
   }
 
-  private ensureTokenizerReady(): void {
+  private ensureTokenizerReady(): AdvancedTokenizer {
     if (!this.tokenizer) {
       throw new Error('Tokenizer not initialized. Call init_tokenizer first.');
     }
+    return this.tokenizer;
   }
 
-  private ensureLearnerReady(): void {
+  private ensureLearnerReady(): LearnerService {
     if (!this.learnerService) {
       throw new Error('Learner service not initialized. Call init_learner (after init_tokenizer) first.');
     }
+    return this.learnerService;
   }
 
   private sanitizeTextInput(input: string, maxLength = 10000): string {
@@ -439,8 +464,8 @@ export class HopeMemoryServer {
         try {
           const cleaned = this.sanitizeTextInput(params.query, 5000);
           const memories = await this.model.recallMemory(cleaned, params.topK ?? 5);
-          const results = memories.map(mem => Array.from(unwrapTensor(mem).dataSync()));
-          memories.forEach(mem => mem.dispose());
+          const results = memories.map((mem: tf.Tensor2D) => Array.from(unwrapTensor(mem).dataSync()));
+          memories.forEach((mem: tf.Tensor2D) => mem.dispose());
 
           return {
             content: [{
@@ -499,10 +524,10 @@ export class HopeMemoryServer {
         await this.ensureInitialized();
         this.ensureModelReady();
         try {
-          const tensors = params.memories.map(arr => tf.tensor2d([arr]));
+          const tensors = params.memories.map((arr: number[]) => tf.tensor2d([arr]));
           const distilled = this.model.distillMemories(tensors as tf.Tensor2D[]);
           const result = Array.from(unwrapTensor(distilled).dataSync());
-          tensors.forEach(t => t.dispose());
+          tensors.forEach((t: tf.Tensor2D) => t.dispose());
           distilled.dispose();
 
           return {
@@ -1205,10 +1230,10 @@ export class HopeMemoryServer {
 
           const modelSnapshot = await this.model.snapshot();
 
-          const checkpointData = {
+          const checkpointData: CheckpointFile = {
             memoryState,
             inputDim: this.model.getConfig().inputDim, // Add for validation on load
-            config: this.model.getConfig(),
+            config: this.model.getConfig() as HopeMemoryConfig,
             modelSnapshot,
             version: HOPE_MEMORY_VERSION,
             timestamp: Date.now()
@@ -1260,10 +1285,10 @@ export class HopeMemoryServer {
           memoryState.timestamp = Date.now();
           const modelSnapshot = await this.model.snapshot();
 
-          const checkpointData = {
+          const checkpointData: CheckpointFile = {
             memoryState,
             inputDim: this.model.getConfig().inputDim,
-            config: this.model.getConfig(),
+            config: this.model.getConfig() as HopeMemoryConfig,
             modelSnapshot,
             version: HOPE_MEMORY_VERSION,
             timestamp: Date.now()
@@ -1363,8 +1388,9 @@ export class HopeMemoryServer {
         await this.ensureInitialized();
 
         try {
+          const model = this.ensureModelReady();
           // Initialize tokenizer if not already done
-          this.ensureTokenizerReady();
+          const tokenizer = this.ensureTokenizerReady();
 
           const learnerConfig: Partial<LearnerConfig> = {
             bufferSize: params.bufferSize,
@@ -1379,7 +1405,7 @@ export class HopeMemoryServer {
             nanGuardThreshold: params.nanGuardThreshold
           };
 
-          this.learnerService = new LearnerService(this.model, this.tokenizer, learnerConfig);
+          this.learnerService = new LearnerService(model, tokenizer, learnerConfig);
 
           return {
             content: [{
@@ -1407,9 +1433,9 @@ export class HopeMemoryServer {
       async () => {
         try {
           await this.ensureInitialized();
-          this.ensureLearnerReady();
+          const learner = this.ensureLearnerReady();
 
-          this.learnerService.pauseTraining();
+          learner.pauseTraining();
 
           return {
             content: [{
@@ -1437,9 +1463,9 @@ export class HopeMemoryServer {
       async () => {
         try {
           await this.ensureInitialized();
-          this.ensureLearnerReady();
+          const learner = this.ensureLearnerReady();
 
-          this.learnerService.pauseTraining();
+          learner.pauseTraining();
 
           return {
             content: [{
@@ -1467,9 +1493,9 @@ export class HopeMemoryServer {
       async () => {
         try {
           await this.ensureInitialized();
-          this.ensureLearnerReady();
+          const learner = this.ensureLearnerReady();
 
-          this.learnerService.startTraining();
+          learner.startTraining();
 
           return {
             content: [{
@@ -1497,9 +1523,9 @@ export class HopeMemoryServer {
       async () => {
         try {
           await this.ensureInitialized();
-          this.ensureLearnerReady();
+          const learner = this.ensureLearnerReady();
 
-          this.learnerService.resumeTraining();
+          learner.resumeTraining();
 
           return {
             content: [{
@@ -1527,9 +1553,9 @@ export class HopeMemoryServer {
       async () => {
         try {
           await this.ensureInitialized();
-          this.ensureLearnerReady();
+          const learner = this.ensureLearnerReady();
 
-          const stats = this.learnerService.getTrainingStats();
+          const stats = learner.getTrainingStats();
 
           return {
             content: [{
@@ -1562,8 +1588,8 @@ export class HopeMemoryServer {
       async () => {
         try {
           await this.ensureInitialized();
-          this.ensureLearnerReady();
-          const stats = this.learnerService.getTrainingStats();
+          const learner = this.ensureLearnerReady();
+          const stats = learner.getTrainingStats();
 
           return {
             content: [{
@@ -1623,11 +1649,11 @@ export class HopeMemoryServer {
             : this.sanitizeTextInput(params.negative, 10000);
 
         try {
-          this.ensureLearnerReady();
+          const learner = this.ensureLearnerReady();
 
-          await this.learnerService.addTrainingSample(input, target, positive, negative);
+          await learner.addTrainingSample(input, target, positive, negative);
 
-          const stats = this.learnerService.getTrainingStats();
+          const stats = learner.getTrainingStats();
 
           return {
             content: [{
@@ -1769,20 +1795,7 @@ export class HopeMemoryServer {
 
   private async loadCheckpointFile(validatedPath: string): Promise<{ content: Array<{ type: string; text: string }> }> {
     const data = await fs.readFile(validatedPath, 'utf-8');
-    const checkpointData = JSON.parse(data) as {
-      memoryState?: SerializedMemoryState | {
-        shortTerm: number[];
-        longTerm: number[];
-        meta: number[];
-        timestamps: number[];
-        accessCounts: number[];
-        surpriseHistory: number[];
-      };
-      shapes?: Record<string, number[]>;
-      inputDim?: number;
-      modelSnapshot?: Awaited<ReturnType<HopeMemoryModel['snapshot']>>;
-      checksum?: string;
-    };
+    const checkpointData = JSON.parse(data) as PartialCheckpointFile;
 
     if (checkpointData.checksum) {
       const checksum = checkpointData.checksum;
