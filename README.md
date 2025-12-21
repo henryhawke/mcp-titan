@@ -1,4 +1,4 @@
-# HOPE Memory: AI That Remembers Like You Do
+# TITAN Memory: AI That Remembers Like You Do
 
 **Turn any AI into a learning companion that remembers across conversations**
 
@@ -9,14 +9,14 @@
 
 ---
 
-## What is HOPE?
+## What is MCP-TITAN??
 
 Think about how **you** remember things:
 - 💭 **Short-term memory** - What you heard 5 seconds ago
 - 📝 **Long-term memory** - Important facts you recall later
 - 🗄️ **Deep storage** - Things you "just know" from years ago
 
-**HOPE** (Hierarchical Online Persistent Encoding) gives AI this same ability. Instead of forgetting everything after each conversation, it builds up knowledge like a human brain.
+**HOPE** (Hierarchical Online Persistent Encoding) is the second generation of TITAN and gives AI this same ability. Instead of forgetting everything after each conversation, it builds up knowledge like a human brain.
 
 ### The Problem HOPE Solves
 
